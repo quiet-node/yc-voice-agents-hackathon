@@ -1489,6 +1489,51 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .fix-now-btn:hover   { opacity: 0.82; }
     .fix-now-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* ── Fix item action row ──────────────────────────────────────────────── */
+    .fix-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .resolve-btn {
+      padding: 5px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .resolve-btn:hover   { opacity: 0.82; }
+    .resolve-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .done-btn {
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      background: transparent;
+      color: var(--muted);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .done-btn:hover { background: var(--border); color: var(--text); }
+    .fix-stale-hint {
+      font-size: 11px;
+      color: var(--amber);
+      margin-top: 4px;
+    }
+    .fix-item.is-done {
+      opacity: 0.45;
+    }
+    .fix-item.is-done .fix-actions { display: none; }
     /* ── Heal step log ─────────────────────────────────────────────────────── */
     .heal-steps {
       margin-top: 10px;
@@ -1805,20 +1850,54 @@ function buildFixItem(item) {
     row.appendChild(dot);
     row.appendChild(document.createTextNode("Queued"));
     div.appendChild(row);
-  } else if (apiAvailable && (item.scenario_names || []).length > 0) {
-    const btn = document.createElement("button");
-    btn.className = "fix-now-btn";
-    btn.type = "button";
-    btn.textContent = "Fix Now";
-    btn.addEventListener("click", () => triggerHeal(item.scenario_names, btn));
-    div.appendChild(btn);
+  } else {
+    // Idle — show action row
+    const actions = document.createElement("div");
+    actions.className = "fix-actions";
+
+    if (apiAvailable) {
+      const resolveBtn = document.createElement("button");
+      resolveBtn.className = "resolve-btn";
+      resolveBtn.type = "button";
+      resolveBtn.innerHTML = "&#9889; Resolve";
+      resolveBtn.addEventListener("click", () => triggerHeal(item.scenario_names || [], resolveBtn, div));
+      actions.appendChild(resolveBtn);
+    }
+
+    const doneBtn = document.createElement("button");
+    doneBtn.className = "done-btn";
+    doneBtn.type = "button";
+    doneBtn.textContent = "✓ Mark Done";
+    doneBtn.addEventListener("click", () => markDone(item.id, div));
+    actions.appendChild(doneBtn);
+
+    div.appendChild(actions);
   }
 
   return div;
 }
 
-async function triggerHeal(scenarioNames, buttonEl) {
-  if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = "Queuing…"; }
+// ── Done-item tracking (localStorage) ───────────────────────────────────────
+const _DONE_KEY = "bayviewDoneItems";
+let _doneItems = new Set(JSON.parse(localStorage.getItem(_DONE_KEY) || "[]"));
+
+function markDone(itemId, divEl) {
+  _doneItems.add(itemId);
+  localStorage.setItem(_DONE_KEY, JSON.stringify([..._doneItems]));
+  if (divEl) divEl.classList.add("is-done");
+}
+
+async function triggerHeal(scenarioNames, buttonEl, itemDiv) {
+  if (!scenarioNames || scenarioNames.length === 0) {
+    // Stale report — scenario IDs not loaded yet
+    const hint = document.createElement("p");
+    hint.className = "fix-stale-hint";
+    hint.textContent = "⚠ Click Refresh above to load scenario data, then try again.";
+    if (itemDiv && !itemDiv.querySelector(".fix-stale-hint")) itemDiv.appendChild(hint);
+    setTimeout(() => hint.remove(), 5000);
+    return;
+  }
+  if (buttonEl) { buttonEl.disabled = true; buttonEl.innerHTML = "&#8987; Queuing…"; }
   try {
     const res = await fetch("/api/trigger-heal", {
       method: "POST",
@@ -1827,24 +1906,29 @@ async function triggerHeal(scenarioNames, buttonEl) {
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) {
-      console.error("trigger-heal failed:", payload.error);
-      if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = "Fix Now"; }
+      if (buttonEl) { buttonEl.disabled = false; buttonEl.innerHTML = "&#9889; Resolve"; }
+      const hint = document.createElement("p");
+      hint.className = "fix-stale-hint";
+      hint.textContent = `⚠ ${payload.error || "Heal request failed — is the webhook server running?"}`;
+      if (itemDiv && !itemDiv.querySelector(".fix-stale-hint")) itemDiv.appendChild(hint);
+      setTimeout(() => hint.remove(), 6000);
     }
+    // On success the next poll will flip the item to "queued" state automatically
   } catch (err) {
-    console.error("trigger-heal error:", err);
-    if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = "Fix Now"; }
+    if (buttonEl) { buttonEl.disabled = false; buttonEl.innerHTML = "&#9889; Resolve"; }
   }
 }
 
 function renderFixQueue() {
   const list = document.getElementById("fix-list");
-  document.getElementById("fix-count").textContent = `${model.fix_queue.length} fixes`;
+  const active = model.fix_queue.filter((item) => !_doneItems.has(item.id));
+  document.getElementById("fix-count").textContent = `${active.length} fixes`;
   list.replaceChildren();
-  if (!model.fix_queue.length) {
+  if (!active.length) {
     list.appendChild(document.createTextNode("No fixes queued."));
     return;
   }
-  for (const item of model.fix_queue) {
+  for (const item of active) {
     list.appendChild(buildFixItem(item));
   }
 }
