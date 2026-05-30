@@ -57,6 +57,12 @@ from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategie
 from pipecat.workers.runner import WorkerRunner
 
 from mock_backend import PATIENTS
+from video_avatar import (
+    AVATAR_PROVIDER_NONE,
+    avatar_video_transport_params,
+    create_avatar_service,
+    get_avatar_provider,
+)
 
 load_dotenv(override=True)
 
@@ -109,6 +115,7 @@ async def run_bot(
     from_number: str | None = None,
     audio_in_sample_rate: int = 16000,
     audio_out_sample_rate: int = 24000,
+    avatar_provider: str = AVATAR_PROVIDER_NONE,
 ):
     """Main bot logic.
 
@@ -117,6 +124,7 @@ async def run_bot(
         from_number: Caller's phone number (Twilio path only).
         audio_in_sample_rate: Input audio sample rate in Hz. Defaults to 16000 (WebRTC).
         audio_out_sample_rate: Output audio sample rate in Hz. Defaults to 24000 (WebRTC).
+        avatar_provider: Optional video avatar renderer for WebRTC calls.
     """
     logger.info("Starting bot")
 
@@ -326,18 +334,32 @@ async def run_bot(
         ),
     )
 
-    # Pipeline - assembled from reusable components
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            user_aggregator,
-            llm,
-            tts,
-            transport.output(),
-            assistant_aggregator,
-        ]
-    )
+    avatar_session: aiohttp.ClientSession | None = None
+    avatar_service = None
+    try:
+        if avatar_provider != AVATAR_PROVIDER_NONE:
+            avatar_session = aiohttp.ClientSession()
+            avatar_service = create_avatar_service(avatar_provider, session=avatar_session)
+            logger.info(f"Video avatar enabled: provider={avatar_provider}")
+    except Exception:
+        if avatar_session and not avatar_session.closed:
+            await avatar_session.close()
+        raise
+
+    # Pipeline - assembled from reusable components. The avatar service is an
+    # optional renderer after TTS; it does not replace the bot brain or tools.
+    pipeline_steps = [
+        transport.input(),
+        stt,
+        user_aggregator,
+        llm,
+        tts,
+    ]
+    if avatar_service:
+        pipeline_steps.append(avatar_service)
+    pipeline_steps.extend([transport.output(), assistant_aggregator])
+
+    pipeline = Pipeline(pipeline_steps)
 
     worker = PipelineWorker(
         pipeline,
@@ -368,8 +390,12 @@ async def run_bot(
 
     runner = WorkerRunner(handle_sigint=False)
 
-    await runner.add_workers(worker)
-    await runner.run()
+    try:
+        await runner.add_workers(worker)
+        await runner.run()
+    finally:
+        if avatar_session and not avatar_session.closed:
+            await avatar_session.close()
 
 
 async def bot(runner_args: RunnerArguments):
@@ -377,6 +403,8 @@ async def bot(runner_args: RunnerArguments):
 
     from_number: str | None = None
     transport_overrides: dict = {}
+    avatar_provider = get_avatar_provider()
+    run_avatar_provider = AVATAR_PROVIDER_NONE
 
     # Krisp is available when deployed to Pipecat Cloud
     if os.environ.get("ENV") != "local":
@@ -389,6 +417,7 @@ async def bot(runner_args: RunnerArguments):
     match runner_args:
         case SmallWebRTCRunnerArguments():
             webrtc_connection: SmallWebRTCConnection = runner_args.webrtc_connection
+            run_avatar_provider = avatar_provider
 
             transport = SmallWebRTCTransport(
                 webrtc_connection=webrtc_connection,
@@ -396,9 +425,15 @@ async def bot(runner_args: RunnerArguments):
                     audio_in_enabled=True,
                     audio_in_filter=krisp_filter,
                     audio_out_enabled=True,
+                    **avatar_video_transport_params(run_avatar_provider),
                 ),
             )
         case WebSocketRunnerArguments():
+            if avatar_provider != AVATAR_PROVIDER_NONE:
+                logger.info(
+                    f"Ignoring AVATAR_PROVIDER={avatar_provider} for Twilio; "
+                    "video avatar rendering is WebRTC-only."
+                )
             # Twilio media streams are 8 kHz μ-law in both directions.
             # This overrides the default sample rates: 16 kHz in / 24 kHz out.
             transport_overrides["audio_in_sample_rate"] = 8000
@@ -434,10 +469,18 @@ async def bot(runner_args: RunnerArguments):
             logger.error(f"Unsupported runner arguments type: {type(runner_args)}")
             return
 
-    await run_bot(transport, from_number=from_number, **transport_overrides)
+    await run_bot(
+        transport,
+        from_number=from_number,
+        avatar_provider=run_avatar_provider,
+        **transport_overrides,
+    )
 
 
 if __name__ == "__main__":
     from pipecat.runner.run import main
 
+    from demo_frontend import mount_demo_frontend
+
+    mount_demo_frontend()
     main()

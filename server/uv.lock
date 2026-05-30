@@ -477,6 +477,17 @@ wheels = [
 ]
 
 [[package]]
+name = "daily-python"
+version = "0.28.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/63/9321ec71b9dc2c1493c2563da994f69e96b36f0455fbc6a5d6a28891f5a7/daily_python-0.28.1-cp37-abi3-macosx_10_15_x86_64.whl", hash = "sha256:4a3cc675beb8405540ed85de517dffd1c115835dce986abd9b3d06bd222f6f5e", size = 13352100, upload-time = "2026-05-07T23:11:45.575Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/eb/e28839c206a586e10b03db7dc99dd978fa615cf3d78d644c836270ae987c/daily_python-0.28.1-cp37-abi3-macosx_11_0_arm64.whl", hash = "sha256:b873df4e219588fe154b7d5cb9e6938d400992cf9813995b6e63f84a9e331919", size = 11886300, upload-time = "2026-05-07T23:11:48.585Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/ab/4d2f50f15e21ecbfa136f87cf07714601e1c78151ba61fe9a17eeaaa6af0/daily_python-0.28.1-cp37-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0ef8375cbc78ffe59966a8ff5b2563c196b0d740cff0b76e6156851d71301b00", size = 13951479, upload-time = "2026-05-07T23:11:51.276Z" },
+    { url = "https://files.pythonhosted.org/packages/48/e5/67fad868676422f38de82be4a8bc0ca0e425b35ff64a5ae05c152bd98d82/daily_python-0.28.1-cp37-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:f333b1c8614fef4b5802e7651c11160c8e7ccae1e440493c0d5f0aca60e09089", size = 14481540, upload-time = "2026-05-07T23:11:53.767Z" },
+]
+
+[[package]]
 name = "detect-installer"
 version = "0.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -935,6 +946,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/ac/fb4c578f4a3256561548cd825646680edcadb9440f3f68add95ade1eb791/ifaddr-0.2.0.tar.gz", hash = "sha256:cc0cbfcaabf765d44595825fb96a99bb12c79716b73b44330ea38ee2b0c4aed4", size = 10485, upload-time = "2022-06-15T21:40:27.561Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9c/1f/19ebc343cc71a7ffa78f17018535adc5cbdd87afb31d7c34874680148b32/ifaddr-0.2.0-py3-none-any.whl", hash = "sha256:085e0305cfe6f16ab12d72e2024030f5d52674afad6911bb1eee207177b8a748", size = 12314, upload-time = "2022-06-15T21:40:25.756Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/34/14ca021ce8e5dfedc35312d08ba8bf51fdd999c576889fc2c24cb97f4f10/iniconfig-2.3.0.tar.gz", hash = "sha256:c76315c77db068650d49c5b56314774a7804df16fee4402c1f19d6d15d8c4730", size = 20503, upload-time = "2025-10-18T21:55:43.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/b1/3846dd7f199d53cb17f49cba7e651e9ce294d8497c8c150530ed11865bb8/iniconfig-2.3.0-py3-none-any.whl", hash = "sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12", size = 7484, upload-time = "2025-10-18T21:55:41.639Z" },
 ]
 
 [[package]]
@@ -1676,6 +1696,9 @@ runner = [
     { name = "python-dotenv" },
     { name = "uvicorn" },
 ]
+tavus = [
+    { name = "daily-python" },
+]
 webrtc = [
     { name = "aiortc" },
     { name = "opencv-python" },
@@ -1715,6 +1738,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7a/02/04303b83b45315bba144e52684425c65ba909d1a271626639d28022f4053/pipecatcloud-0.7.1.tar.gz", hash = "sha256:d906348ddea1c069682e6991ca068e1599c9ef9c2f4323fb67f09af8ce303eb6", size = 262044, upload-time = "2026-05-14T15:56:48.583Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ba/18/1fa2848fc9b24d7fdfad66b8a7c0e83222d0213c997cc7d95178098aef3d/pipecatcloud-0.7.1-py3-none-any.whl", hash = "sha256:c8ce282d9f34f6d6e8db59a461ec72ed78b74217f2ca09c5381ad2db4fdcbb46", size = 79155, upload-time = "2026-05-14T15:56:46.903Z" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/e2/3e91f31a7d2b083fe6ef3fa267035b518369d9511ffab804f839851d2779/pluggy-1.6.0.tar.gz", hash = "sha256:7dcc130b76258d33b90f61b658791dede3486c3e6bfb003ee5c9bfb396dd22f3", size = 69412, upload-time = "2025-05-15T12:30:07.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/20/4d324d65cc6d9205fabedc306948156824eb9f0ee1633355a8f7ec5c66bf/pluggy-1.6.0-py3-none-any.whl", hash = "sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746", size = 20538, upload-time = "2025-05-15T12:30:06.134Z" },
 ]
 
 [[package]]
@@ -2093,6 +2125,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/51/4e/3aa27f74211522dba7e9cbc3e74de779c6d4b654c54e50a4840623be8014/pyright-1.1.409.tar.gz", hash = "sha256:986ee05beca9e077c165758ad123667c679e050059a2546aa02473930394bc93", size = 4430434, upload-time = "2026-04-23T11:02:03.799Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/6b/330d8ebae582b30c2959a1ef4c3bc344ebde48c2ff0c3f113c4710735e11/pyright-1.1.409-py3-none-any.whl", hash = "sha256:aa3ea228cab90c845c7a60d28db7a844c04315356392aa09fafcee98c8c22fb3", size = 6438161, upload-time = "2026-04-23T11:02:01.309Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "8.4.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/5c/00a0e072241553e1a7496d638deababa67c5058571567b92a7eaa258397c/pytest-8.4.2.tar.gz", hash = "sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01", size = 1519618, upload-time = "2025-09-04T14:34:22.711Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl", hash = "sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79", size = 365750, upload-time = "2025-09-04T14:34:20.226Z" },
 ]
 
 [[package]]
@@ -3031,24 +3079,26 @@ name = "yc-voice-agent-hackathon"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "pipecat-ai", extra = ["gradium", "openai", "runner", "webrtc", "websocket"] },
+    { name = "pipecat-ai", extra = ["gradium", "openai", "runner", "tavus", "webrtc", "websocket"] },
     { name = "pipecatcloud" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "pyright" },
+    { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "pipecat-ai", extras = ["gradium", "openai", "runner", "silero", "webrtc", "websocket"], specifier = ">=1.3.0" },
+    { name = "pipecat-ai", extras = ["gradium", "openai", "runner", "silero", "tavus", "webrtc", "websocket"], specifier = ">=1.3.0" },
     { name = "pipecatcloud", specifier = ">=0.7.1" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pyright", specifier = ">=1.1.404,<2" },
+    { name = "pytest", specifier = ">=8.0,<9" },
     { name = "ruff", specifier = ">=0.12.11,<1" },
 ]
