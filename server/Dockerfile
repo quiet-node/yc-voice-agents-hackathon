@@ -23,3 +23,4 @@ COPY ./nemotron_llm.py nemotron_llm.py
 COPY ./nvidia_stt.py nvidia_stt.py
 COPY ./stt_provider.py stt_provider.py
 COPY ./video_avatar.py video_avatar.py
+COPY ./language_router.py language_router.py

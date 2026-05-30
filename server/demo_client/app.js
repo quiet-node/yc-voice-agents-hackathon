@@ -1310,30 +1310,29 @@ function setGestureBadge(status, text) {
 }
 
 function setAvatarStatus(avatar) {
-  const providerName = avatar?.provider ? avatar.provider[0].toUpperCase() + avatar.provider.slice(1) : "Avatar";
-  let text = "Avatar: audio-only";
+  let text = "AI Avatar audio-only";
   let live = false;
   let warning = false;
   const status = avatar?.status || "";
 
   if (avatar?.error) {
-    text = "Avatar: config error";
+    text = "AI Avatar config error";
     warning = true;
   } else if (avatar?.enabled && !avatar?.configured) {
-    text = `Avatar: ${providerName} setup needed`;
+    text = "AI Avatar setup needed";
     warning = true;
   } else if (status === "starting") {
-    text = `Avatar: ${providerName} starting`;
+    text = "AI Avatar starting";
   } else if (["ready", "room_joined", "avatar_joined"].includes(status)) {
-    text = `Avatar: ${providerName} joining`;
+    text = "AI Avatar joining";
   } else if (status === "video_active") {
-    text = `Avatar: ${providerName} live`;
+    text = "AI Avatar live";
     live = true;
   } else if (status === "unavailable" || status === "error") {
-    text = `Avatar: ${providerName} unavailable`;
+    text = "AI Avatar unavailable";
     warning = true;
   } else if (avatar?.enabled && avatar?.configured) {
-    text = `Avatar: ${providerName} configured`;
+    text = "AI Avatar configured";
   }
 
   elements.avatarStatus.classList.toggle("warning", warning);

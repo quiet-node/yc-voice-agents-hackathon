@@ -357,13 +357,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         transcript_context = str(body.get("transcript_context", "")).strip()
 
-        api_key = env_value("ANTHROPIC_API_KEY")
-        if not api_key:
-            self.send_json({"ok": False, "error": "ANTHROPIC_API_KEY not configured"}, status=500)
+        base_url = env_value("TOKEN_ROUTER_BASE_URL")
+        api_key = env_value("TOKEN_ROUTER_API_KEY")
+        if not base_url or not api_key:
+            self.send_json(
+                {"ok": False, "error": "TOKEN_ROUTER_BASE_URL / TOKEN_ROUTER_API_KEY not configured"},
+                status=500,
+            )
             return
 
         try:
-            import anthropic  # noqa: PLC0415 – deferred import keeps startup fast
+            from openai import OpenAI  # noqa: PLC0415
 
             prompt_parts = [
                 "Given this description of a voice agent test scenario, generate: "
@@ -375,18 +379,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if transcript_context:
                 prompt_parts.append(f"Transcript context:\n{transcript_context}")
             prompt_parts.append(
-                'Respond with JSON only: {"name": ..., "persona": ..., "pass_criteria": ...}'
+                'Respond with JSON only — no markdown fences: {"name": ..., "persona": ..., "pass_criteria": ...}'
             )
             prompt = "\n\n".join(prompt_parts)
 
-            client = anthropic.Anthropic(api_key=api_key)
-            message = client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            client = OpenAI(base_url=base_url, api_key=api_key)
+            response = client.chat.completions.create(
+                model="openai/gpt-5.5",
                 max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],
             )
-            raw_text = message.content[0].text.strip()
-            # Strip markdown code fences if present
+            raw_text = (response.choices[0].message.content or "").strip()
             raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
             raw_text = re.sub(r"\n?```$", "", raw_text)
             result = json.loads(raw_text)
@@ -434,7 +437,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Api-Key {cekura_api_key}",
+                "X-CEKURA-API-KEY": cekura_api_key,
             },
             method="POST",
         )
