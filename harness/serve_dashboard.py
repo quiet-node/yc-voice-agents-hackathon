@@ -15,11 +15,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -154,7 +157,104 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/heal-status":
             self._serve_heal_status()
             return
+        if parsed.path == "/api/transcripts":
+            self._serve_transcripts()
+            return
         super().do_GET()
+
+    def _serve_transcripts(self) -> None:
+        """Scan harness/runs for live call transcripts and eval run results."""
+        runs_dir = ROOT / "harness" / "runs"
+        transcripts: list[dict[str, Any]] = []
+
+        # 1. Live call transcripts: runs/transcripts/*.json
+        live_dir = runs_dir / "transcripts"
+        if live_dir.exists():
+            for fpath in sorted(live_dir.glob("*.json")):
+                try:
+                    data = json.loads(fpath.read_text(encoding="utf-8"))
+                    if data.get("source") != "live":
+                        continue
+                    ts_raw = data.get("timestamp", "")
+                    # Generate a stable id from the filename
+                    stem = fpath.stem  # e.g. 20260530T141500-live
+                    entry_id = f"live-{stem.split('-')[0]}"
+                    transcripts.append(
+                        {
+                            "id": entry_id,
+                            "source": "live",
+                            "title": "Live Call",
+                            "timestamp": ts_raw,
+                            "duration_s": data.get("duration_s"),
+                            "passed": None,
+                            "transcript": data.get("transcript", []),
+                        }
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # 2. Eval runs: runs/webhook-*/scenario-*.json
+        for scenario_path in sorted(runs_dir.glob("webhook-*/scenario-*.json")):
+            try:
+                data = json.loads(scenario_path.read_text(encoding="utf-8"))
+                # Derive timestamp from directory name: webhook-YYYYMMDDTHHMMSS
+                dir_name = scenario_path.parent.name  # e.g. webhook-20260530T224023
+                ts_match = re.search(r"(\d{8}T\d{6})", dir_name)
+                ts_raw = ""
+                if ts_match:
+                    ts_str = ts_match.group(1)
+                    try:
+                        dt = datetime.strptime(ts_str, "%Y%m%dT%H%M%S").replace(tzinfo=UTC)
+                        ts_raw = dt.isoformat()
+                    except ValueError:
+                        ts_raw = ts_str
+
+                scenario_id = data.get("scenario_id", "")
+                entry_id = f"eval-{scenario_id}-{dir_name}"
+
+                # Try to get title from scenario name in the data
+                title = str(data.get("scenario_name") or data.get("name") or f"Scenario {scenario_id}")
+
+                # Look for transcript data
+                transcript_data: list[dict[str, Any]] = []
+                if "transcript" in data and isinstance(data["transcript"], list):
+                    transcript_data = data["transcript"]
+                else:
+                    # Check for sibling transcript.json
+                    sibling = scenario_path.parent / "transcript.json"
+                    if sibling.exists():
+                        try:
+                            t = json.loads(sibling.read_text(encoding="utf-8"))
+                            if isinstance(t, list):
+                                transcript_data = t
+                            elif isinstance(t, dict) and "transcript" in t:
+                                transcript_data = t["transcript"]
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                passed_raw = data.get("passed")
+                passed = bool(passed_raw) if passed_raw is not None else None
+
+                transcripts.append(
+                    {
+                        "id": entry_id,
+                        "source": "eval",
+                        "title": title,
+                        "timestamp": ts_raw,
+                        "duration_s": None,
+                        "passed": passed,
+                        "transcript": transcript_data,
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Sort by timestamp descending (most recent first)
+        def sort_key(item: dict[str, Any]) -> str:
+            return item.get("timestamp") or ""
+
+        transcripts.sort(key=sort_key, reverse=True)
+        self.send_json({"ok": True, "transcripts": transcripts})
 
     def _serve_heal_status(self) -> None:
         status_path = ROOT / "harness" / "runs" / "webhook-status.json"
@@ -171,6 +271,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/trigger-heal":
             self._handle_trigger_heal()
+            return
+        if parsed.path == "/api/generate-scenario":
+            self._handle_generate_scenario()
+            return
+        if parsed.path == "/api/create-scenario":
+            self._handle_create_scenario()
             return
         if parsed.path != "/api/refresh":
             self.send_error(404)
@@ -230,6 +336,120 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_json({"ok": False, "error": errors[0], "errors": errors}, status=502)
             return
         self.send_json({"ok": True, "enqueued": enqueued, "errors": errors})
+
+    def _read_json_body(self) -> dict[str, Any] | None:
+        """Read and parse the JSON request body. Returns None and sends 400 on error."""
+        content_length = int(self.headers.get("Content-Length", 0))
+        body_bytes = self.rfile.read(content_length) if content_length else b""
+        try:
+            return json.loads(body_bytes) if body_bytes else {}
+        except Exception:
+            self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
+            return None
+
+    def _handle_generate_scenario(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        description = str(body.get("description", "")).strip()
+        if not description:
+            self.send_json({"ok": False, "error": "description is required"}, status=400)
+            return
+        transcript_context = str(body.get("transcript_context", "")).strip()
+
+        api_key = env_value("ANTHROPIC_API_KEY")
+        if not api_key:
+            self.send_json({"ok": False, "error": "ANTHROPIC_API_KEY not configured"}, status=500)
+            return
+
+        try:
+            import anthropic  # noqa: PLC0415 – deferred import keeps startup fast
+
+            prompt_parts = [
+                "Given this description of a voice agent test scenario, generate: "
+                "a scenario name (short, descriptive), a caller persona (2-3 sentences "
+                "describing who the caller is and what they do), and pass criteria "
+                "(what the agent must do to pass).",
+                f"Description: {description}",
+            ]
+            if transcript_context:
+                prompt_parts.append(f"Transcript context:\n{transcript_context}")
+            prompt_parts.append(
+                'Respond with JSON only: {"name": ..., "persona": ..., "pass_criteria": ...}'
+            )
+            prompt = "\n\n".join(prompt_parts)
+
+            client = anthropic.Anthropic(api_key=api_key)
+            message = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw_text = message.content[0].text.strip()
+            # Strip markdown code fences if present
+            raw_text = re.sub(r"^```[a-z]*\n?", "", raw_text)
+            raw_text = re.sub(r"\n?```$", "", raw_text)
+            result = json.loads(raw_text)
+            self.send_json(
+                {
+                    "ok": True,
+                    "name": str(result.get("name", "")),
+                    "persona": str(result.get("persona", "")),
+                    "pass_criteria": str(result.get("pass_criteria", "")),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def _handle_create_scenario(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = str(body.get("name", "")).strip()
+        persona = str(body.get("persona", "")).strip()
+        pass_criteria = str(body.get("pass_criteria", "")).strip()
+        if not name or not persona or not pass_criteria:
+            self.send_json(
+                {"ok": False, "error": "name, persona, and pass_criteria are required"},
+                status=400,
+            )
+            return
+
+        cekura_api_key = env_value("CEKURA_API_KEY")
+        if not cekura_api_key:
+            self.send_json({"ok": False, "error": "CEKURA_API_KEY not configured"}, status=500)
+            return
+
+        agent_id = self.server.state.cekura_agent_id
+        payload = json.dumps(
+            {
+                "name": name,
+                "agent": agent_id,
+                "description": persona,
+                "success_criteria": pass_criteria,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            f"{CEKURA_API_BASE}/test_framework/v1/scenarios/",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Api-Key {cekura_api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            self.send_json({"ok": True, "scenario_id": result.get("id")})
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")
+            self.send_json(
+                {"ok": False, "error": f"Cekura API error {exc.code}: {body_text[:300]}"},
+                status=502,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(exc)}, status=500)
 
     def authorized(self, parsed: Any) -> bool:
         expected = self.server.state.refresh_token

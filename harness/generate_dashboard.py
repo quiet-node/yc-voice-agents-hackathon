@@ -1080,21 +1080,78 @@ HTML_TEMPLATE = r"""<!doctype html>
       color: var(--ink);
       letter-spacing: 0;
     }
-    button, input {
+    button, input, textarea {
       font: inherit;
     }
     .app {
-      min-height: 100vh;
       display: grid;
+      grid-template-areas: "header header" "sidebar main";
       grid-template-rows: auto 1fr;
+      grid-template-columns: 220px 1fr;
+      min-height: 100vh;
     }
     header {
+      grid-area: header;
       background: #ffffff;
       border-bottom: 1px solid var(--line);
       padding: 18px 22px;
       position: sticky;
       top: 0;
       z-index: 4;
+    }
+    /* ── Sidebar ──────────────────────────────────────────────────────────── */
+    .sidebar {
+      grid-area: sidebar;
+      background: #0d1117;
+      border-right: 1px solid #21262d;
+      padding: 16px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      overflow-y: auto;
+    }
+    .sidebar-label {
+      padding: 0 14px 8px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+      color: #6e7681;
+    }
+    .sidebar-agent {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      color: #8b949e;
+      font-size: 13px;
+      line-height: 1.3;
+      background: transparent;
+      border-top: 0;
+      border-right: 0;
+      border-bottom: 0;
+      text-align: left;
+      width: 100%;
+    }
+    .sidebar-agent:hover {
+      background: rgba(255,255,255,0.04);
+      color: #c9d1d9;
+    }
+    .sidebar-agent.active {
+      border-left-color: #1f6feb;
+      background: rgba(31, 111, 235, 0.1);
+      color: #c9d1d9;
+    }
+    .sidebar-agent-icon {
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .sidebar-agent-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .header-row {
       max-width: 1440px;
@@ -1194,9 +1251,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       color: var(--green);
     }
     main {
-      max-width: 1440px;
-      width: 100%;
-      margin: 0 auto;
+      grid-area: main;
+      min-width: 0;
       padding: 18px 22px 28px;
       display: grid;
       gap: 16px;
@@ -1411,9 +1467,166 @@ HTML_TEMPLATE = r"""<!doctype html>
     .status-failure::before { background: var(--red); }
     .status-unknown::before { background: var(--amber); }
     .hidden { display: none !important; }
+    /* ── Call History ──────────────────────────────────────────────────────── */
+    .callhistory-layout {
+      display: flex;
+      height: calc(100vh - 180px);
+      min-height: 400px;
+    }
+    .callhistory-list {
+      width: 35%;
+      min-width: 200px;
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+      padding: 8px 0;
+    }
+    .callhistory-detail {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+    }
+    .call-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--line);
+      border-left: 3px solid transparent;
+    }
+    .call-row:hover { background: #f5f7f3; }
+    .call-row.active { border-left-color: var(--teal); background: #f1fbf8; }
+    .call-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      margin-top: 4px;
+    }
+    .call-dot-green { background: var(--green); }
+    .call-dot-orange { background: var(--amber); }
+    .call-dot-blue { background: var(--blue); }
+    .call-row-info { min-width: 0; }
+    .call-row-title { font-weight: 650; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .call-row-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .transcript-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+    .transcript-bubbles { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px; }
+    .bubble {
+      max-width: 72%;
+      padding: 9px 12px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .bubble-user {
+      align-self: flex-end;
+      background: #d9ebff;
+      color: #17395e;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble-assistant {
+      align-self: flex-start;
+      background: #f1fbf8;
+      color: #1a3830;
+      border-bottom-left-radius: 4px;
+    }
+    .bubble-tool {
+      align-self: flex-start;
+      font-size: 11px;
+      font-style: italic;
+      color: var(--muted);
+      background: transparent;
+      padding: 2px 0;
+    }
+    .create-test-btn {
+      margin-top: auto;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+    .create-test-btn button {
+      padding: 7px 16px;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .create-test-btn button:hover { opacity: 0.82; }
+    /* ── New Test ──────────────────────────────────────────────────────────── */
+    .newtest-layout { padding: 20px; display: flex; flex-direction: column; gap: 20px; max-width: 700px; }
+    .newtest-generate-row { display: flex; gap: 10px; }
+    .newtest-generate-row input {
+      flex: 1;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      font-size: 14px;
+    }
+    .newtest-generate-row input:focus { outline: 2px solid var(--teal); border-color: transparent; }
+    .gen-btn {
+      padding: 9px 18px;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .gen-btn:hover { opacity: 0.82; }
+    .gen-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .generated-form { display: flex; flex-direction: column; gap: 14px; }
+    .gen-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--green);
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+    .gen-field { display: flex; flex-direction: column; gap: 5px; }
+    .gen-field label { font-size: 12px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .gen-field input, .gen-field textarea {
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      font-size: 13px;
+      resize: vertical;
+    }
+    .gen-field input:focus, .gen-field textarea:focus { outline: 2px solid var(--teal); border-color: transparent; }
+    .create-cekura-btn {
+      padding: 9px 20px;
+      background: #1f6feb;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 650;
+      font-size: 14px;
+      align-self: flex-start;
+    }
+    .create-cekura-btn:hover { opacity: 0.82; }
+    .create-cekura-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .newtest-status { font-size: 13px; padding: 8px 0; }
+    .newtest-status.error { color: var(--red); }
+    .newtest-status.success { color: var(--green); }
     @media (max-width: 1120px) {
       .grid { grid-template-columns: 1fr; }
       .kpis { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .app {
+        grid-template-areas: "header" "main";
+        grid-template-columns: 1fr;
+      }
+      .sidebar { display: none; }
+      .callhistory-layout { flex-direction: column; height: auto; }
+      .callhistory-list { width: 100%; border-right: none; border-bottom: 1px solid var(--line); }
     }
     @media (max-width: 640px) {
       header, main { padding-left: 14px; padding-right: 14px; }
@@ -1604,12 +1817,29 @@ HTML_TEMPLATE = r"""<!doctype html>
           <button class="active" data-view="overview">Overview</button>
           <button data-view="matrix">Matrix</button>
           <button data-view="runs">Runs</button>
+          <button data-view="callhistory">Call History</button>
+          <button data-view="newtest">New Test</button>
         </div>
         <button id="refresh-button" class="refresh-button" type="button">Refresh</button>
         <span id="refresh-status" class="refresh-status" aria-live="polite"></span>
       </div>
     </div>
   </header>
+  <nav class="sidebar" aria-label="Agents">
+    <div class="sidebar-label">Agents</div>
+    <button class="sidebar-agent active" data-agent-id="18021">
+      <span class="sidebar-agent-icon">💊</span>
+      <span class="sidebar-agent-name">Bayview Pharmacy</span>
+    </button>
+    <button class="sidebar-agent" data-agent-id="">
+      <span class="sidebar-agent-icon">🤖</span>
+      <span class="sidebar-agent-name">Voice Agent Auto-Improvement</span>
+    </button>
+    <button class="sidebar-agent" data-agent-id="">
+      <span class="sidebar-agent-icon">🛡️</span>
+      <span class="sidebar-agent-name">Voice Agent Scammer Detection</span>
+    </button>
+  </nav>
   <main>
     <section class="kpis" id="kpis"></section>
     <section class="grid view view-overview">
@@ -1633,6 +1863,43 @@ HTML_TEMPLATE = r"""<!doctype html>
     <section class="panel view view-runs hidden">
       <div class="panel-title"><h2>Run Facts</h2><span class="pill low">normalized evidence</span></div>
       <div class="panel-body matrix" id="runs"></div>
+    </section>
+    <section class="panel view view-callhistory hidden">
+      <div class="panel-title"><h2>Call History</h2><span id="callhistory-count" class="pill low"></span></div>
+      <div class="callhistory-layout">
+        <div class="callhistory-list" id="callhistory-list">
+          <div class="transcript-empty">Loading…</div>
+        </div>
+        <div class="callhistory-detail" id="callhistory-detail">
+          <div class="transcript-empty">Select a call to view the transcript.</div>
+        </div>
+      </div>
+    </section>
+    <section class="panel view view-newtest hidden">
+      <div class="panel-title"><h2>New Test</h2></div>
+      <div class="newtest-layout">
+        <div class="newtest-generate-row">
+          <input type="text" id="newtest-description" placeholder="Describe the scenario, e.g. Caller is confused and asks for a pharmacist…" />
+          <button class="gen-btn" id="newtest-generate-btn" type="button">Generate →</button>
+        </div>
+        <div class="generated-form hidden" id="generated-form">
+          <div class="gen-label">✦ GENERATED — edit before submitting</div>
+          <div class="gen-field">
+            <label for="gen-name">Name</label>
+            <input type="text" id="gen-name" />
+          </div>
+          <div class="gen-field">
+            <label for="gen-persona">Persona</label>
+            <textarea id="gen-persona" rows="3"></textarea>
+          </div>
+          <div class="gen-field">
+            <label for="gen-pass-criteria">Pass Criteria</label>
+            <textarea id="gen-pass-criteria" rows="3"></textarea>
+          </div>
+          <button class="create-cekura-btn" id="create-cekura-btn" type="button">Create in Cekura →</button>
+        </div>
+        <div id="newtest-status" class="newtest-status" aria-live="polite"></div>
+      </div>
     </section>
   </main>
 </div>
@@ -2053,8 +2320,197 @@ function setupViews() {
       button.classList.add("active");
       document.querySelectorAll(".view").forEach((view) => view.classList.add("hidden"));
       document.querySelector(`.view-${button.dataset.view}`).classList.remove("hidden");
+      if (button.dataset.view === "callhistory") {
+        loadCallHistory();
+      }
     });
   });
+}
+
+// ── Call History ─────────────────────────────────────────────────────────────
+let _selectedCallId = null;
+
+async function loadCallHistory() {
+  if (!apiAvailable) {
+    document.getElementById("callhistory-list").innerHTML =
+      '<div class="transcript-empty">Call history requires the serve_dashboard.py server.</div>';
+    return;
+  }
+  try {
+    const res = await fetch("/api/transcripts", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    if (!payload.ok) throw new Error(payload.error || "Unknown error");
+    renderCallList(payload.transcripts || []);
+  } catch (err) {
+    document.getElementById("callhistory-list").innerHTML =
+      `<div class="transcript-empty">Failed to load: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderCallList(transcripts) {
+  const list = document.getElementById("callhistory-list");
+  const count = document.getElementById("callhistory-count");
+  if (count) count.textContent = `${transcripts.length} calls`;
+  if (!transcripts.length) {
+    list.innerHTML = '<div class="transcript-empty">No call records found.</div>';
+    return;
+  }
+  list.innerHTML = transcripts.map((t) => {
+    let dotClass = "call-dot-blue";
+    if (t.source === "eval") {
+      dotClass = t.passed === true ? "call-dot-green" : t.passed === false ? "call-dot-orange" : "call-dot-blue";
+    }
+    const dateStr = t.timestamp ? new Date(t.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    const durStr = t.duration_s != null ? `${t.duration_s}s` : "";
+    const sub = [t.source, dateStr, durStr].filter(Boolean).join(" · ");
+    return `
+      <div class="call-row${t.id === _selectedCallId ? " active" : ""}" data-call-id="${escapeHtml(t.id)}" data-call-idx="${transcripts.indexOf(t)}">
+        <span class="call-dot ${dotClass}"></span>
+        <div class="call-row-info">
+          <div class="call-row-title">${escapeHtml(t.title)}</div>
+          <div class="call-row-sub">${escapeHtml(sub)}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+  // Store transcript data for click handler
+  list._transcripts = transcripts;
+  list.querySelectorAll("[data-call-id]").forEach((row) => {
+    row.addEventListener("click", () => {
+      _selectedCallId = row.dataset.callId;
+      const idx = parseInt(row.dataset.callIdx, 10);
+      list.querySelectorAll(".call-row").forEach((r) => r.classList.remove("active"));
+      row.classList.add("active");
+      renderTranscript(list._transcripts[idx]);
+    });
+  });
+}
+
+function renderTranscript(t) {
+  const detail = document.getElementById("callhistory-detail");
+  if (!t || !t.transcript || t.transcript.length === 0) {
+    detail.innerHTML = '<div class="transcript-empty">No transcript data available for this call.</div>';
+    return;
+  }
+  const bubblesHtml = t.transcript.map((turn) => {
+    if (turn.role === "tool") {
+      return `<div class="bubble bubble-tool">🔧 ${escapeHtml(turn.name || "tool call")}</div>`;
+    }
+    const cls = turn.role === "user" ? "bubble-user" : "bubble-assistant";
+    return `<div class="bubble ${cls}">${escapeHtml(turn.content || "")}</div>`;
+  }).join("");
+  detail.innerHTML = `
+    <div class="transcript-bubbles">${bubblesHtml}</div>
+    <div class="create-test-btn">
+      <button id="create-from-call-btn" type="button">＋ Create test from this call</button>
+    </div>
+  `;
+  document.getElementById("create-from-call-btn").addEventListener("click", () => {
+    // Switch to New Test tab and pre-load transcript
+    _pendingTranscript = t.transcript.map((turn) =>
+      `${turn.role}: ${turn.content || ""}`
+    ).join("\n");
+    document.querySelectorAll("[data-view]").forEach((item) => item.classList.remove("active"));
+    document.querySelectorAll(".view").forEach((view) => view.classList.add("hidden"));
+    const newtestBtn = document.querySelector("[data-view='newtest']");
+    if (newtestBtn) newtestBtn.classList.add("active");
+    document.querySelector(".view-newtest").classList.remove("hidden");
+  });
+}
+
+// ── New Test ─────────────────────────────────────────────────────────────────
+let _pendingTranscript = "";
+
+function setupNewTest() {
+  const genBtn = document.getElementById("newtest-generate-btn");
+  const createBtn = document.getElementById("create-cekura-btn");
+  if (!genBtn || !createBtn) return;
+
+  genBtn.addEventListener("click", async () => {
+    const description = document.getElementById("newtest-description").value.trim();
+    if (!description) return;
+    genBtn.disabled = true;
+    genBtn.textContent = "Generating…";
+    document.getElementById("newtest-status").textContent = "";
+    document.getElementById("newtest-status").className = "newtest-status";
+    try {
+      const body = { description };
+      if (_pendingTranscript) body.transcript_context = _pendingTranscript;
+      const res = await fetch("/api/generate-scenario", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) throw new Error(payload.error || "Generation failed");
+      document.getElementById("gen-name").value = payload.name || "";
+      document.getElementById("gen-persona").value = payload.persona || "";
+      document.getElementById("gen-pass-criteria").value = payload.pass_criteria || "";
+      document.getElementById("generated-form").classList.remove("hidden");
+      _pendingTranscript = "";
+    } catch (err) {
+      const status = document.getElementById("newtest-status");
+      status.textContent = `Error: ${err.message}`;
+      status.className = "newtest-status error";
+    } finally {
+      genBtn.disabled = false;
+      genBtn.textContent = "Generate →";
+    }
+  });
+
+  createBtn.addEventListener("click", async () => {
+    const name = document.getElementById("gen-name").value.trim();
+    const persona = document.getElementById("gen-persona").value.trim();
+    const pass_criteria = document.getElementById("gen-pass-criteria").value.trim();
+    if (!name || !persona || !pass_criteria) {
+      const status = document.getElementById("newtest-status");
+      status.textContent = "Please fill in all fields before creating.";
+      status.className = "newtest-status error";
+      return;
+    }
+    createBtn.disabled = true;
+    createBtn.textContent = "Creating…";
+    document.getElementById("newtest-status").textContent = "";
+    document.getElementById("newtest-status").className = "newtest-status";
+    try {
+      const res = await fetch("/api/create-scenario", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, persona, pass_criteria }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) throw new Error(payload.error || "Create failed");
+      const status = document.getElementById("newtest-status");
+      status.textContent = `Scenario created! ID: ${payload.scenario_id}`;
+      status.className = "newtest-status success";
+      document.getElementById("generated-form").classList.add("hidden");
+      document.getElementById("newtest-description").value = "";
+    } catch (err) {
+      const status = document.getElementById("newtest-status");
+      status.textContent = `Error: ${err.message}`;
+      status.className = "newtest-status error";
+    } finally {
+      createBtn.disabled = false;
+      createBtn.textContent = "Create in Cekura →";
+    }
+  });
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function setupSidebar() {
+  document.querySelectorAll(".sidebar-agent").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".sidebar-agent").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+  // Highlight the active agent based on model.agent.name
+  const agentName = (model.agent.name || "").toLowerCase();
+  if (agentName.includes("bayview")) {
+    const bayviewBtn = document.querySelector(".sidebar-agent[data-agent-id='18021']");
+    if (bayviewBtn) bayviewBtn.classList.add("active");
+  }
 }
 
 async function loadServedReport() {
@@ -2250,6 +2706,8 @@ function init() {
   renderAll();
   setupViews();
   setupRefresh();
+  setupSidebar();
+  setupNewTest();
   loadServedReport();
   setupHealPolling();
   autoTriggerHeals();
