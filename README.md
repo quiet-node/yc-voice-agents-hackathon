@@ -230,6 +230,15 @@ Open `harness/runs/demo/index.html` in your browser. The harness extracts
 Bayview-specific facts, clusters failures, ranks fixes, and writes a
 machine-readable `report.json` plus a human-readable `fix_plan.md`.
 
+To pull the latest real Cekura result for the configured Bayview agent:
+
+```bash
+python3 harness/generate_dashboard.py \
+  --cekura-result-id latest \
+  --cekura-agent-id 18021 \
+  --out harness/runs/latest-cekura
+```
+
 ## Learn more
 
 ### Pipecat

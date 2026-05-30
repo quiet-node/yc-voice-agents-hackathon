@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from html import escape
@@ -24,6 +28,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "harness" / "examples" / "bayview_cekura_report_sample.json"
 DEFAULT_OUT = ROOT / "harness" / "runs" / "latest"
+CEKURA_API_BASE = "https://api.cekura.ai"
 
 KNOWN_DRUGS = [
     "lisinopril",
@@ -52,7 +57,8 @@ CALLER_CONFUSION_RE = re.compile(
 )
 INFRA_RE = re.compile(
     r"\b(31921|31920|websocket|stream closed|hangup|hang up|twilio|capacity|timeout|"
-    r"cold start|connection closed)\b",
+    r"cold start|connection closed|did not speak|didn't speak|did not respond|"
+    r"didn't respond|no turns in conversation|main agent: 0 seconds)\b",
     re.IGNORECASE,
 )
 
@@ -193,6 +199,61 @@ def load_input(path: Path) -> Any:
         return parse_plain_text_report(content)
 
 
+def load_env_value(name: str) -> str:
+    if os.environ.get(name):
+        return os.environ[name]
+    for env_path in (ROOT / "server" / ".env", ROOT / ".env"):
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            if key.strip() == name:
+                return value.strip().strip("'\"")
+    return ""
+
+
+def cekura_get(path: str, api_key: str) -> Any:
+    request = urllib.request.Request(
+        f"{CEKURA_API_BASE}{path}",
+        headers={"X-CEKURA-API-KEY": api_key, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Cekura API returned HTTP {exc.code}: {body[:300]}") from exc
+
+
+def latest_cekura_result_id(agent_id: int, api_key: str) -> int:
+    query = urllib.parse.urlencode({"agent_id": agent_id, "page_size": 10})
+    payload = cekura_get(f"/test_framework/v1/results/?{query}", api_key)
+    results = payload.get("results") if isinstance(payload, dict) else payload
+    if not isinstance(results, list) or not results:
+        raise RuntimeError(f"No Cekura results found for agent {agent_id}.")
+    completed = [item for item in results if item.get("status") == "completed"]
+    selected = completed[0] if completed else results[0]
+    result_id = selected.get("id")
+    if not isinstance(result_id, int):
+        raise RuntimeError("Latest Cekura result did not include an integer id.")
+    return result_id
+
+
+def load_cekura_result(result_id_arg: str, agent_id: int) -> tuple[Any, Path]:
+    api_key = load_env_value("CEKURA_API_KEY")
+    if not api_key:
+        raise RuntimeError("CEKURA_API_KEY was not found in the environment or server/.env.")
+    if result_id_arg == "latest":
+        result_id = latest_cekura_result_id(agent_id, api_key)
+    else:
+        result_id = int(result_id_arg)
+    payload = cekura_get(f"/test_framework/v1/results/{result_id}/", api_key)
+    return payload, Path(f"cekura-result-{result_id}.json")
+
+
 def parse_plain_text_report(content: str) -> dict[str, Any]:
     """Best-effort parser for pasted transcript blocks.
 
@@ -240,6 +301,8 @@ def find_run_items(payload: Any) -> list[dict[str, Any]]:
         value = payload.get(key)
         if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
             return value
+        if isinstance(value, dict) and value and all(isinstance(item, dict) for item in value.values()):
+            return list(value.values())
     if any(key in payload for key in ("transcript", "messages", "conversation", "scenario_name")):
         return [payload]
     return []
@@ -261,6 +324,8 @@ def normalize_expected(value: Any) -> list[str]:
 
 def normalize_metrics(run: dict[str, Any]) -> list[Metric]:
     raw_metrics = get_any(run, ["metrics", "evaluations", "scores", "checks"], [])
+    if not raw_metrics and isinstance(run.get("evaluation"), dict):
+        raw_metrics = get_any(run["evaluation"], ["metrics", "evaluations", "scores", "checks"], [])
     metrics: list[Metric] = []
     if isinstance(raw_metrics, dict):
         raw_metrics = [
@@ -274,11 +339,26 @@ def normalize_metrics(run: dict[str, Any]) -> list[Metric]:
         name = text_from(get_any(item, ["name", "metric", "title", "label"], f"metric_{idx}"))
         status = normalize_status(get_any(item, ["status", "verdict", "result", "evaluation_status"]))
         score_value = get_any(item, ["score", "value", "rating"])
+        score_normalized_value = get_any(item, ["score_normalized", "normalized_score"])
         score = None
         if isinstance(score_value, (int, float)):
             score = float(score_value)
-            if status == "unknown":
-                status = "success" if score >= 0.8 else "failure"
+        score_normalized = None
+        if isinstance(score_normalized_value, (int, float)):
+            score_normalized = float(score_normalized_value)
+        if status == "unknown":
+            lower_name = name.lower()
+            metric_type = text_from(item.get("type")).lower()
+            pass_fail_metric = (
+                "expected outcome" in lower_name
+                or "infrastructure" in lower_name
+                or "workflow" in metric_type
+                or "adherence" in metric_type
+            )
+            if pass_fail_metric:
+                reference = score_normalized if score_normalized is not None else score
+                if reference is not None:
+                    status = "success" if reference >= 0.8 else "failure"
         reason = text_from(get_any(item, ["reason", "explanation", "message", "details"], ""))
         metrics.append(Metric(name=name, status=status, reason=reason, score=score))
     return metrics
@@ -318,9 +398,9 @@ def parse_turns_from_text(transcript: str) -> list[Turn]:
 
 def canonical_role(role: Any) -> str:
     text = text_from(role).strip().lower()
-    if text in {"caller", "human", "customer", "patient"}:
+    if text in {"caller", "human", "customer", "patient", "testing agent", "test agent"}:
         return "user"
-    if text in {"agent", "bot", "ai"}:
+    if text in {"agent", "bot", "ai", "main agent", "assistant agent"}:
         return "assistant"
     if text in {"function"}:
         return "tool"
@@ -357,7 +437,11 @@ def normalize_turn_item(item: dict[str, Any], index: int) -> list[Turn]:
 
 
 def normalize_turns(run: dict[str, Any]) -> list[Turn]:
-    raw = get_any(run, ["transcript", "messages", "conversation", "turns", "events"], [])
+    raw = get_any(
+        run,
+        ["transcript", "transcript_object", "messages", "conversation", "turns", "events"],
+        [],
+    )
     turns: list[Turn] = []
     if isinstance(raw, str):
         turns = parse_turns_from_text(raw)
@@ -462,10 +546,11 @@ def extract_facts(run: dict[str, Any], turns: list[Turn], status: str) -> Facts:
         and not facts.refill_completed
         and not valid_failed_verification_end
     )
+    ended_reason = text_from(get_any(run.get("metadata", {}) if isinstance(run.get("metadata"), dict) else {}, ["ended_reason"], ""))
     if (
         status == "failure"
         and len([turn for turn in turns if turn.role in {"user", "assistant"}]) <= 4
-        and (facts.end_call_called or facts.infra_signal)
+        and (facts.end_call_called or "main-agent-ended" in ended_reason or "agent_ended" in ended_reason)
     ):
         facts.early_end_call = True
     return facts
@@ -491,16 +576,32 @@ def infer_medication(text: str) -> str:
 
 
 def normalize_run(raw: dict[str, Any], idx: int) -> RunRecord:
+    scenario_obj = raw.get("scenario") if isinstance(raw.get("scenario"), dict) else {}
+    expected_obj = raw.get("expected_outcome") if isinstance(raw.get("expected_outcome"), dict) else {}
     run_id = text_from(get_any(raw, ["id", "run_id", "workflow_run_id", "call_id", "sid"], f"run-{idx:03d}"))
     scenario = text_from(
-        get_any(raw, ["scenario_name", "scenario", "name", "title", "test_name"], f"Scenario {idx}")
+        get_any(
+            raw,
+            ["scenario_name", "name", "title", "test_name"],
+            get_any(scenario_obj, ["name", "title"], f"Scenario {idx}"),
+        )
     )
     status = normalize_status(get_any(raw, ["evaluation_status", "status", "verdict", "result", "outcome"]))
     metrics = normalize_metrics(raw)
     if status == "unknown" and metrics:
         status = "failure" if any(metric.status == "failure" for metric in metrics) else "success"
     turns = normalize_turns(raw)
-    expected = normalize_expected(get_any(raw, ["expected_outcome", "expected", "objective", "criteria"], []))
+    expected = normalize_expected(
+        get_any(
+            raw,
+            ["expected", "objective", "criteria"],
+            get_any(
+                scenario_obj,
+                ["expected_outcome_prompt", "expected_outcome", "objective"],
+                get_any(expected_obj, ["explanation", "prompt", "expected"], []),
+            ),
+        )
+    )
     facts = extract_facts(raw, turns, status)
     return RunRecord(
         run_id=run_id,
@@ -805,7 +906,15 @@ def build_model(payload: Any, source_path: Path, title: str) -> dict[str, Any]:
     failures = [failure for record in records for failure in classify_failures(record)]
     clusters = build_clusters(failures)
     agent_payload = payload.get("agent", {}) if isinstance(payload, dict) else {}
-    agent_name = text_from(get_any(agent_payload, ["name", "agent_name"], "Bayview Pharmacy"))
+    if not isinstance(agent_payload, dict):
+        agent_payload = {}
+    agent_name = text_from(
+        get_any(
+            agent_payload,
+            ["name", "agent_name"],
+            get_any(payload, ["agent_name"], "Bayview Pharmacy") if isinstance(payload, dict) else "Bayview Pharmacy",
+        )
+    )
     result_id = text_from(
         get_any(payload, ["result_id", "id", "report_id", "benchmark_id"], source_path.stem)
         if isinstance(payload, dict)
@@ -1474,15 +1583,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Cekura-style JSON or text report.")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output directory for dashboard files.")
     parser.add_argument("--title", default="Bayview Pharmacy Self-Improvement Harness")
+    parser.add_argument(
+        "--cekura-result-id",
+        help="Fetch a real Cekura result by id, or pass 'latest' to use the newest result for --cekura-agent-id.",
+    )
+    parser.add_argument(
+        "--cekura-agent-id",
+        type=int,
+        default=18021,
+        help="Agent ID used when --cekura-result-id latest is provided.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    input_path = args.input.resolve()
     out_dir = args.out.resolve()
-    payload = load_input(input_path)
-    model = build_model(payload, input_path, args.title)
+    if args.cekura_result_id:
+        payload, source_path = load_cekura_result(args.cekura_result_id, args.cekura_agent_id)
+    else:
+        source_path = args.input.resolve()
+        payload = load_input(source_path)
+    model = build_model(payload, source_path, args.title)
     write_report(model, out_dir)
     print(f"Wrote dashboard: {out_dir / 'index.html'}")
     print(f"Wrote normalized report: {out_dir / 'report.json'}")

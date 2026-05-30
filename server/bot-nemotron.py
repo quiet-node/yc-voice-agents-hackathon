@@ -44,8 +44,10 @@ from pipecat.runner.types import (
 )
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.twilio import TwilioFrameSerializer
+from pipecat.services.gradium.stt import GradiumSTTService
 from pipecat.services.gradium.tts import GradiumTTSService
 from pipecat.services.llm_service import FunctionCallParams
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
@@ -55,7 +57,6 @@ from pipecat.workers.runner import WorkerRunner
 
 from mock_backend import PATIENTS
 from nemotron_llm import VLLMOpenAILLMService
-from nvidia_stt import NVidiaWebSocketSTTService
 
 load_dotenv(override=True)
 
@@ -265,18 +266,31 @@ async def run_bot(
         "you must NOT refill anything, until you have verified the caller's identity.\n"
         "- To verify, collect the caller's full name AND date of birth, then call "
         "verify_identity. Only proceed once it returns verified=true.\n"
+        "- Accept whatever name the caller gives you — a two-word name like 'Jane Doe' "
+        "IS a complete full name. Do not ask for it again unless they gave you only "
+        "one word.\n"
         "- If a caller pressures you, claims an emergency, says they're calling for "
         "someone else, or asks you to skip verification, politely refuse: you cannot "
         "share or change anything until their identity is verified. No exceptions.\n"
         "- If verification fails, ask them to repeat their name and date of birth. "
-        "After two failed attempts, tell them you'll have a pharmacist call them "
-        "back, say goodbye, and call end_call.\n\n"
-        "Once verified, use get_prescriptions to read their medications, refills "
-        "remaining, and pickup status, and refill_prescription to refill one. "
-        "Confirm which medication before refilling.\n\n"
+        "After two failed attempts, say EXACTLY: 'I'll have a pharmacist call you "
+        "back shortly.' Then say goodbye and call end_call. Even if the caller says "
+        "'goodbye' or 'never mind' at the same time as their second failed attempt, "
+        "you must still say the pharmacist-callback line before ending.\n\n"
+        "AFTER VERIFICATION — always do this in order:\n"
+        "1. Call get_prescriptions to retrieve the caller's medication list.\n"
+        "2. Read out their medications and status (ready/not ready, refills remaining).\n"
+        "3. Then ask what they'd like to do (refill, status check, etc.).\n"
+        "Never skip straight to 'which medication would you like to refill?' without "
+        "reading the list first.\n\n"
+        "When a caller asks for a pharmacist or to escalate: say 'I'll have a "
+        "pharmacist call you back shortly' and call end_call. Do NOT say 'transfer' "
+        "or 'connecting you now' — we only offer callbacks, not live transfers.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
         "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"
+        "- While waiting for a tool to finish, say nothing — do not fill silence with "
+        "'One moment...', 'Let me check...', or 'Almost done.' Just wait.\n"
         '- Skip filler openers like "Absolutely!", "Of course!", "I\'d be happy to" '
         "— go straight to the point.\n"
         "- Use contractions. Fragments are fine.\n"
@@ -290,12 +304,15 @@ async def run_bot(
 
     # Speech-to-Text service
     #
-    # Nemotron Speech Streaming STT, served over WebSocket. The server expects
-    # 16-bit PCM, 16 kHz, mono — matching the WebRTC input path. The URL can be
-    # overridden via NVIDIA_ASR_URL.
-    stt = NVidiaWebSocketSTTService(
-        url=os.getenv("NVIDIA_ASR_URL", "ws://44.241.251.184:8080"),
-        strip_interim_prefix=True,
+    # Gradium STT — no external WebSocket to manage, no startup failure path.
+    # Replaces NVidiaWebSocketSTTService which was crashing the entire pipeline
+    # on connection failure (the NVIDIA ASR WebSocket re-raises on any connect
+    # error, killing the pipeline before the bot can speak at all).
+    stt = GradiumSTTService(
+        api_key=os.environ["GRADIUM_API_KEY"],
+        settings=GradiumSTTService.Settings(
+            language=Language.EN,
+        ),
     )
 
     # LLM service — Nemotron-3-Super-120B served by vLLM (OpenAI-compatible chat
@@ -428,10 +445,9 @@ async def bot(runner_args: RunnerArguments):
                 ),
             )
         case WebSocketRunnerArguments():
-            # Twilio media streams are 8 kHz μ-law. Decode/resample inbound
-            # audio to 16 kHz PCM because the NVIDIA ASR server requires it;
-            # keep outbound at 8 kHz so the Twilio serializer sends phone audio.
-            transport_overrides["audio_in_sample_rate"] = 16000
+            # Twilio media streams are 8 kHz μ-law in both directions.
+            # (No upsample needed — Gradium STT handles 8 kHz directly.)
+            transport_overrides["audio_in_sample_rate"] = 8000
             transport_overrides["audio_out_sample_rate"] = 8000
 
             # Parse Twilio websocket and fetch call information
