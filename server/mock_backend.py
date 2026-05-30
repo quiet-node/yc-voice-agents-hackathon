@@ -4,133 +4,89 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""Mock backend data for the Field & Flower flower-shop demo.
+"""Mock backend data for the Bayview Pharmacy secure refill demo.
 
-This is the file to edit when customizing the demo for your own hackathon
-project: swap the catalog, add or remove "known customer" phone numbers, or
-replace the dicts entirely with calls to a real backend (database, REST API,
-etc.) from inside the tool functions in ``bot.py``.
+This is the file to edit when customizing the demo: swap the patient records,
+or replace the dict entirely with calls to a real backend (database, REST API,
+etc.) from inside the tool functions in ``bot-nemotron.py``.
 
-Both lookups are case-insensitive on the key side in ``bot.py`` — bouquet
-names are lowercased before lookup, and phone numbers should be stored in
-E.164 format (e.g. ``+14155551234``) to match Twilio's ``from_number``.
+Patients are keyed by ``(name, date_of_birth)``. The lookup in the bot lowercases
+and strips the name before matching, and expects the date of birth in ISO format
+(``YYYY-MM-DD``) — the LLM normalizes whatever the caller says (e.g. "April 12th,
+1985") into that shape before calling ``verify_identity``.
 
-Each bouquet carries:
-    price (USD), description, in_stock (bool), occasions (list of lowercase
-    strings the LLM can filter on), on_special (bool — used by the "any
-    deals?" path).
+Each patient carries:
+    id (str), prescriptions (list). Each prescription has:
+        drug (str), refills_remaining (int), ready (bool — is it filled and
+        waiting for pickup), last_filled (ISO date str).
 """
 
-BOUQUETS = {
-    "spring sunshine": {
-        "price": 45.00,
-        "description": "Yellow tulips and daffodils",
-        "in_stock": True,
-        "occasions": ["birthday", "thank you", "get well", "mother's day", "spring"],
-        "on_special": False,
+PATIENTS = {
+    ("jane doe", "1985-04-12"): {
+        "id": "p1",
+        "prescriptions": [
+            {
+                "drug": "Lisinopril 10mg",
+                "refills_remaining": 2,
+                "ready": True,
+                "last_filled": "2026-05-02",
+            },
+            {
+                "drug": "Atorvastatin 20mg",
+                "refills_remaining": 0,
+                "ready": False,
+                "last_filled": "2026-04-18",
+            },
+        ],
     },
-    "rose romance": {
-        "price": 65.00,
-        "description": "A dozen red roses with baby's breath",
-        "in_stock": True,
-        "occasions": ["valentine's day", "anniversary", "romance", "date night"],
-        "on_special": False,
+    ("john smith", "1972-09-30"): {
+        "id": "p2",
+        "prescriptions": [
+            {
+                "drug": "Metformin 500mg",
+                "refills_remaining": 5,
+                "ready": False,
+                "last_filled": "2026-05-10",
+            },
+        ],
     },
-    "wildflower medley": {
-        "price": 38.00,
-        "description": "Mixed seasonal wildflowers",
-        "in_stock": True,
-        "occasions": ["birthday", "thank you", "just because", "housewarming"],
-        "on_special": True,
+    ("maria garcia", "1990-11-23"): {
+        "id": "p3",
+        "prescriptions": [
+            {
+                "drug": "Levothyroxine 50mcg",
+                "refills_remaining": 1,
+                "ready": True,
+                "last_filled": "2026-05-15",
+            },
+            {
+                "drug": "Albuterol inhaler",
+                "refills_remaining": 3,
+                "ready": False,
+                "last_filled": "2026-03-28",
+            },
+        ],
     },
-    "lily elegance": {
-        "price": 55.00,
-        "description": "White lilies and greenery",
-        "in_stock": False,
-        "occasions": ["sympathy", "funeral", "remembrance"],
-        "on_special": False,
+    ("david lee", "1968-02-07"): {
+        "id": "p4",
+        "prescriptions": [
+            {
+                "drug": "Amlodipine 5mg",
+                "refills_remaining": 0,
+                "ready": False,
+                "last_filled": "2026-04-30",
+            },
+        ],
     },
-    "succulent garden": {
-        "price": 42.00,
-        "description": "Assorted succulents in a ceramic pot",
-        "in_stock": True,
-        "occasions": ["housewarming", "office", "thank you", "low maintenance"],
-        "on_special": False,
+    ("susan brown", "1995-07-19"): {
+        "id": "p5",
+        "prescriptions": [
+            {
+                "drug": "Sertraline 50mg",
+                "refills_remaining": 4,
+                "ready": True,
+                "last_filled": "2026-05-20",
+            },
+        ],
     },
-    "mother's day pastels": {
-        "price": 58.00,
-        "description": "Pink peonies, lavender, and white roses",
-        "in_stock": True,
-        "occasions": ["mother's day", "birthday", "thank you"],
-        "on_special": False,
-    },
-    "birthday brights": {
-        "price": 48.00,
-        "description": "Sunflowers, gerbera daisies, and orange roses",
-        "in_stock": True,
-        "occasions": ["birthday", "congratulations", "thank you"],
-        "on_special": True,
-    },
-    "sympathy whites": {
-        "price": 70.00,
-        "description": "White lilies, roses, and chrysanthemums",
-        "in_stock": True,
-        "occasions": ["sympathy", "funeral", "remembrance", "condolences"],
-        "on_special": False,
-    },
-    "anniversary blush": {
-        "price": 75.00,
-        "description": "Two dozen pink roses with eucalyptus",
-        "in_stock": False,
-        "occasions": ["anniversary", "valentine's day", "romance", "engagement"],
-        "on_special": False,
-    },
-    "garden party": {
-        "price": 52.00,
-        "description": "Hydrangeas, snapdragons, and stock",
-        "in_stock": True,
-        "occasions": ["wedding", "shower", "birthday", "thank you"],
-        "on_special": False,
-    },
-    "autumn harvest": {
-        "price": 46.00,
-        "description": "Sunflowers, mums, and fall foliage",
-        "in_stock": True,
-        "occasions": ["fall", "thanksgiving", "autumn", "halloween", "thank you"],
-        "on_special": True,
-    },
-    "winter pine": {
-        "price": 54.00,
-        "description": "White roses, pine, cedar, and eucalyptus",
-        "in_stock": True,
-        "occasions": ["winter", "christmas", "holiday", "new year"],
-        "on_special": False,
-    },
-    "new arrival": {
-        "price": 44.00,
-        "description": "Soft pink and white gerberas with daisies",
-        "in_stock": True,
-        "occasions": ["new baby", "baby shower", "congratulations"],
-        "on_special": False,
-    },
-    "graduation gold": {
-        "price": 48.00,
-        "description": "Sunflowers, yellow roses, and billy balls",
-        "in_stock": True,
-        "occasions": ["graduation", "congratulations", "achievement"],
-        "on_special": False,
-    },
-    "tulip tower": {
-        "price": 40.00,
-        "description": "Assorted spring tulips",
-        "in_stock": True,
-        "occasions": ["spring", "easter", "just because", "thinking of you"],
-        "on_special": False,
-    },
-}
-
-# Add your own number here if you want to test the bot with a known customer
-KNOWN_CUSTOMERS = {
-    "+14155551234": {"name": "Alex", "last_order": "rose romance"},
-    "+14155555678": {"name": "Jordan", "last_order": "wildflower medley"},
 }
