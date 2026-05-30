@@ -478,7 +478,14 @@ async def run_bot(
         context.add_message(
             {
                 "role": "user",
-                "content": "A caller just connected. Greet them: 'Thanks for calling Bayview Pharmacy. How can I help you today?'",
+                "content": (
+                    "A caller just connected. First ask exactly: 'Thanks for calling "
+                    "Bayview Pharmacy. Do you prefer English or Spanish? Raise one "
+                    "finger for English, or two fingers for Spanish. Prefiere ingles "
+                    "o espanol? Levante un dedo para ingles, o dos dedos para "
+                    "espanol.' Do not ask how you can help until the language "
+                    "preference is selected."
+                ),
             }
         )
         await worker.queue_frames([LLMRunFrame()])

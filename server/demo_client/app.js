@@ -12,6 +12,9 @@ const VISUAL_DETECTION_INTERVAL_MS = 1200;
 const VISUAL_DETECTION_WINDOW_MS = 4500;
 const VISUAL_DETECTION_REQUIRED_HITS = 1;
 const GESTURE_LANGUAGE_MAP = {
+  Pointing_Up: { language: "English", code: "en" },
+  "Pointing Up": { language: "English", code: "en" },
+  PointingUp: { language: "English", code: "en" },
   Victory: { language: "Spanish", code: "es" },
   ILoveYou: { language: "Spanish", code: "es" },
 };
@@ -546,7 +549,7 @@ function isWordLevel(message) {
 
 function isInternalKickoffText(text) {
   return (
-    text.startsWith("A caller just connected. Greet them:") ||
+    text.startsWith("A caller just connected.") ||
     text.startsWith("VISUAL_CONTEXT:") ||
     text.startsWith("GESTURE_CONTEXT:")
   );
@@ -791,6 +794,7 @@ async function cleanup({ keepMedia = false } = {}) {
     gestureLanguagePending: false,
     gestureLanguageSent: false,
     gestureCueMessageShown: false,
+    activeLanguage: "English",
   });
   setVisualBadge("idle", "Visual detection ready");
   setGestureBadge("idle", "Gesture detection ready");
@@ -1157,7 +1161,7 @@ async function startGestureDetection() {
   try {
     await loadGestureRecognizer();
     if (!state.gestureRecognizer || state.gestureDetectionTimer) return;
-    setGestureBadge("ready", "Gesture language ready");
+    setGestureBadge("ready", "1 English / 2 Spanish");
     state.gestureDetectionTimer = window.setTimeout(runGestureDetection, 300);
   } catch {
     setGestureBadge("error", "Gesture detection unavailable");
@@ -1238,7 +1242,7 @@ function handleGestureRecognition(result) {
   const languageCue = GESTURE_LANGUAGE_MAP[label];
   if (!languageCue || score < GESTURE_DETECTION_THRESHOLD) {
     if (!state.gestureLanguagePending && !state.gestureLanguageSent) {
-      setGestureBadge("ready", "Gesture language ready");
+      setGestureBadge("ready", "1 English / 2 Spanish");
     }
     return;
   }
@@ -1275,7 +1279,7 @@ function flushGestureLanguageRequest() {
 
   const sent = sendRTVI("send-text", {
     content:
-      `GESTURE_CONTEXT: The caller made a language preference gesture. Switch to ${state.activeLanguage} now and continue in ${state.activeLanguage} unless the caller asks to switch back. Say one brief sentence in ${state.activeLanguage} confirming you can help them in that language.`,
+      `GESTURE_CONTEXT: The caller selected ${state.activeLanguage} with the hand gesture. This answers your language preference question. Continue in ${state.activeLanguage} unless the caller asks to switch back. Say one brief confirmation in ${state.activeLanguage}, then ask how you can help today in ${state.activeLanguage}.`,
     options: { run_immediately: true, audio_response: true },
   });
 
@@ -1372,6 +1376,8 @@ window.__bayviewGestureState = () => ({
 });
 window.__bayviewTriggerSpanishGesture = () =>
   handleLanguageGestureCue({ language: "Spanish", code: "es" }, "debug", 1);
+window.__bayviewTriggerEnglishGesture = () =>
+  handleLanguageGestureCue({ language: "English", code: "en" }, "debug", 1);
 window.__bayviewAudioState = () => {
   const audioTrack = state.localStream?.getAudioTracks()[0];
   const remoteTrack = elements.agentAudio.srcObject?.getAudioTracks?.()[0];
