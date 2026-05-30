@@ -115,7 +115,7 @@ def _token_router_key() -> str:
                     key = line.split("=", 1)[1].strip()
                     break
     if not key:
-        raise RuntimeError("TOKEN_ROUTER_API_KEY not found in environment or server/.env.")
+        raise RuntimeError("TOKEN_ROUTER_API_KEY not found in environment or server/.env")
     return key
 
 
@@ -129,7 +129,7 @@ def _token_router_base_url() -> str:
                     url = line.split("=", 1)[1].strip()
                     break
     if not url:
-        raise RuntimeError("TOKEN_ROUTER_BASE_URL not found in environment or server/.env.")
+        raise RuntimeError("TOKEN_ROUTER_BASE_URL not found in environment or server/.env")
     return url
 
 
