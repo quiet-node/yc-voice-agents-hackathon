@@ -21,3 +21,4 @@ COPY ./bot-nemotron.py bot.py
 COPY ./mock_backend.py mock_backend.py
 COPY ./nemotron_llm.py nemotron_llm.py
 COPY ./nvidia_stt.py nvidia_stt.py
+COPY ./stt_provider.py stt_provider.py

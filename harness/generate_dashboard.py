@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from html import escape
@@ -24,6 +28,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INPUT = ROOT / "harness" / "examples" / "bayview_cekura_report_sample.json"
 DEFAULT_OUT = ROOT / "harness" / "runs" / "latest"
+CEKURA_API_BASE = "https://api.cekura.ai"
 
 KNOWN_DRUGS = [
     "lisinopril",
@@ -52,7 +57,8 @@ CALLER_CONFUSION_RE = re.compile(
 )
 INFRA_RE = re.compile(
     r"\b(31921|31920|websocket|stream closed|hangup|hang up|twilio|capacity|timeout|"
-    r"cold start|connection closed)\b",
+    r"cold start|connection closed|did not speak|didn't speak|did not respond|"
+    r"didn't respond|no turns in conversation|main agent: 0 seconds)\b",
     re.IGNORECASE,
 )
 
@@ -193,6 +199,61 @@ def load_input(path: Path) -> Any:
         return parse_plain_text_report(content)
 
 
+def load_env_value(name: str) -> str:
+    if os.environ.get(name):
+        return os.environ[name]
+    for env_path in (ROOT / "server" / ".env", ROOT / ".env"):
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            if key.strip() == name:
+                return value.strip().strip("'\"")
+    return ""
+
+
+def cekura_get(path: str, api_key: str) -> Any:
+    request = urllib.request.Request(
+        f"{CEKURA_API_BASE}{path}",
+        headers={"X-CEKURA-API-KEY": api_key, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Cekura API returned HTTP {exc.code}: {body[:300]}") from exc
+
+
+def latest_cekura_result_id(agent_id: int, api_key: str) -> int:
+    query = urllib.parse.urlencode({"agent_id": agent_id, "page_size": 10})
+    payload = cekura_get(f"/test_framework/v1/results/?{query}", api_key)
+    results = payload.get("results") if isinstance(payload, dict) else payload
+    if not isinstance(results, list) or not results:
+        raise RuntimeError(f"No Cekura results found for agent {agent_id}.")
+    completed = [item for item in results if item.get("status") == "completed"]
+    selected = completed[0] if completed else results[0]
+    result_id = selected.get("id")
+    if not isinstance(result_id, int):
+        raise RuntimeError("Latest Cekura result did not include an integer id.")
+    return result_id
+
+
+def load_cekura_result(result_id_arg: str, agent_id: int) -> tuple[Any, Path]:
+    api_key = load_env_value("CEKURA_API_KEY")
+    if not api_key:
+        raise RuntimeError("CEKURA_API_KEY was not found in the environment or server/.env.")
+    if result_id_arg == "latest":
+        result_id = latest_cekura_result_id(agent_id, api_key)
+    else:
+        result_id = int(result_id_arg)
+    payload = cekura_get(f"/test_framework/v1/results/{result_id}/", api_key)
+    return payload, Path(f"cekura-result-{result_id}.json")
+
+
 def parse_plain_text_report(content: str) -> dict[str, Any]:
     """Best-effort parser for pasted transcript blocks.
 
@@ -240,6 +301,8 @@ def find_run_items(payload: Any) -> list[dict[str, Any]]:
         value = payload.get(key)
         if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
             return value
+        if isinstance(value, dict) and value and all(isinstance(item, dict) for item in value.values()):
+            return list(value.values())
     if any(key in payload for key in ("transcript", "messages", "conversation", "scenario_name")):
         return [payload]
     return []
@@ -261,6 +324,8 @@ def normalize_expected(value: Any) -> list[str]:
 
 def normalize_metrics(run: dict[str, Any]) -> list[Metric]:
     raw_metrics = get_any(run, ["metrics", "evaluations", "scores", "checks"], [])
+    if not raw_metrics and isinstance(run.get("evaluation"), dict):
+        raw_metrics = get_any(run["evaluation"], ["metrics", "evaluations", "scores", "checks"], [])
     metrics: list[Metric] = []
     if isinstance(raw_metrics, dict):
         raw_metrics = [
@@ -274,11 +339,26 @@ def normalize_metrics(run: dict[str, Any]) -> list[Metric]:
         name = text_from(get_any(item, ["name", "metric", "title", "label"], f"metric_{idx}"))
         status = normalize_status(get_any(item, ["status", "verdict", "result", "evaluation_status"]))
         score_value = get_any(item, ["score", "value", "rating"])
+        score_normalized_value = get_any(item, ["score_normalized", "normalized_score"])
         score = None
         if isinstance(score_value, (int, float)):
             score = float(score_value)
-            if status == "unknown":
-                status = "success" if score >= 0.8 else "failure"
+        score_normalized = None
+        if isinstance(score_normalized_value, (int, float)):
+            score_normalized = float(score_normalized_value)
+        if status == "unknown":
+            lower_name = name.lower()
+            metric_type = text_from(item.get("type")).lower()
+            pass_fail_metric = (
+                "expected outcome" in lower_name
+                or "infrastructure" in lower_name
+                or "workflow" in metric_type
+                or "adherence" in metric_type
+            )
+            if pass_fail_metric:
+                reference = score_normalized if score_normalized is not None else score
+                if reference is not None:
+                    status = "success" if reference >= 0.8 else "failure"
         reason = text_from(get_any(item, ["reason", "explanation", "message", "details"], ""))
         metrics.append(Metric(name=name, status=status, reason=reason, score=score))
     return metrics
@@ -318,9 +398,9 @@ def parse_turns_from_text(transcript: str) -> list[Turn]:
 
 def canonical_role(role: Any) -> str:
     text = text_from(role).strip().lower()
-    if text in {"caller", "human", "customer", "patient"}:
+    if text in {"caller", "human", "customer", "patient", "testing agent", "test agent"}:
         return "user"
-    if text in {"agent", "bot", "ai"}:
+    if text in {"agent", "bot", "ai", "main agent", "assistant agent"}:
         return "assistant"
     if text in {"function"}:
         return "tool"
@@ -357,7 +437,11 @@ def normalize_turn_item(item: dict[str, Any], index: int) -> list[Turn]:
 
 
 def normalize_turns(run: dict[str, Any]) -> list[Turn]:
-    raw = get_any(run, ["transcript", "messages", "conversation", "turns", "events"], [])
+    raw = get_any(
+        run,
+        ["transcript", "transcript_object", "messages", "conversation", "turns", "events"],
+        [],
+    )
     turns: list[Turn] = []
     if isinstance(raw, str):
         turns = parse_turns_from_text(raw)
@@ -462,10 +546,11 @@ def extract_facts(run: dict[str, Any], turns: list[Turn], status: str) -> Facts:
         and not facts.refill_completed
         and not valid_failed_verification_end
     )
+    ended_reason = text_from(get_any(run.get("metadata", {}) if isinstance(run.get("metadata"), dict) else {}, ["ended_reason"], ""))
     if (
         status == "failure"
         and len([turn for turn in turns if turn.role in {"user", "assistant"}]) <= 4
-        and (facts.end_call_called or facts.infra_signal)
+        and (facts.end_call_called or "main-agent-ended" in ended_reason or "agent_ended" in ended_reason)
     ):
         facts.early_end_call = True
     return facts
@@ -491,16 +576,32 @@ def infer_medication(text: str) -> str:
 
 
 def normalize_run(raw: dict[str, Any], idx: int) -> RunRecord:
+    scenario_obj = raw.get("scenario") if isinstance(raw.get("scenario"), dict) else {}
+    expected_obj = raw.get("expected_outcome") if isinstance(raw.get("expected_outcome"), dict) else {}
     run_id = text_from(get_any(raw, ["id", "run_id", "workflow_run_id", "call_id", "sid"], f"run-{idx:03d}"))
     scenario = text_from(
-        get_any(raw, ["scenario_name", "scenario", "name", "title", "test_name"], f"Scenario {idx}")
+        get_any(
+            raw,
+            ["scenario_name", "name", "title", "test_name"],
+            get_any(scenario_obj, ["name", "title"], f"Scenario {idx}"),
+        )
     )
     status = normalize_status(get_any(raw, ["evaluation_status", "status", "verdict", "result", "outcome"]))
     metrics = normalize_metrics(raw)
     if status == "unknown" and metrics:
         status = "failure" if any(metric.status == "failure" for metric in metrics) else "success"
     turns = normalize_turns(raw)
-    expected = normalize_expected(get_any(raw, ["expected_outcome", "expected", "objective", "criteria"], []))
+    expected = normalize_expected(
+        get_any(
+            raw,
+            ["expected", "objective", "criteria"],
+            get_any(
+                scenario_obj,
+                ["expected_outcome_prompt", "expected_outcome", "objective"],
+                get_any(expected_obj, ["explanation", "prompt", "expected"], []),
+            ),
+        )
+    )
     facts = extract_facts(raw, turns, status)
     return RunRecord(
         run_id=run_id,
@@ -746,6 +847,7 @@ def build_fix_queue(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "confidence": cluster["confidence"],
                 "target": file_targets.get(cluster["change_type"], "manual review"),
                 "regression_risk": infer_regression_risk(cluster),
+                "scenario_names": cluster.get("scenarios", []),
             }
         )
     return queue
@@ -760,7 +862,7 @@ def infer_regression_risk(cluster: dict[str, Any]) -> str:
         return "Low: config-only, but watch cost and concurrency."
     if "Metric" in cluster["category"]:
         return "Low for agent behavior, medium for score comparability."
-    return "Medium: re-run the full Bayview scenario suite."
+    return "Medium: re-run the full scenario suite."
 
 
 def build_matrix(records: list[RunRecord]) -> list[dict[str, Any]]:
@@ -805,7 +907,15 @@ def build_model(payload: Any, source_path: Path, title: str) -> dict[str, Any]:
     failures = [failure for record in records for failure in classify_failures(record)]
     clusters = build_clusters(failures)
     agent_payload = payload.get("agent", {}) if isinstance(payload, dict) else {}
-    agent_name = text_from(get_any(agent_payload, ["name", "agent_name"], "Bayview Pharmacy"))
+    if not isinstance(agent_payload, dict):
+        agent_payload = {}
+    agent_name = text_from(
+        get_any(
+            agent_payload,
+            ["name", "agent_name"],
+            get_any(payload, ["agent_name"], "Bayview Pharmacy") if isinstance(payload, dict) else "Bayview Pharmacy",
+        )
+    )
     result_id = text_from(
         get_any(payload, ["result_id", "id", "report_id", "benchmark_id"], source_path.stem)
         if isinstance(payload, dict)
@@ -838,14 +948,49 @@ def serialize_run(record: RunRecord) -> dict[str, Any]:
     return data
 
 
-def write_report(model: dict[str, Any], out_dir: Path) -> None:
+def write_report(model: dict[str, Any], out_dir: Path, *, write_html: bool = True) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(
         json.dumps(model, indent=2, ensure_ascii=True, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     (out_dir / "fix_plan.md").write_text(render_fix_plan(model), encoding="utf-8")
-    (out_dir / "index.html").write_text(render_html(model), encoding="utf-8")
+    if write_html:
+        (out_dir / "index.html").write_text(render_html(model), encoding="utf-8")
+
+
+def build_dashboard_model(
+    *,
+    input_path: Path = DEFAULT_INPUT,
+    title: str = "Voice Agent Self-Improvement Harness",
+    cekura_result_id: str | None = None,
+    cekura_agent_id: int = 18021,
+) -> dict[str, Any]:
+    if cekura_result_id:
+        payload, source_path = load_cekura_result(cekura_result_id, cekura_agent_id)
+    else:
+        source_path = input_path.resolve()
+        payload = load_input(source_path)
+    return build_model(payload, source_path, title)
+
+
+def generate_dashboard(
+    *,
+    input_path: Path = DEFAULT_INPUT,
+    out_dir: Path = DEFAULT_OUT,
+    title: str = "Voice Agent Self-Improvement Harness",
+    cekura_result_id: str | None = None,
+    cekura_agent_id: int = 18021,
+    write_html: bool = True,
+) -> dict[str, Any]:
+    model = build_dashboard_model(
+        input_path=input_path,
+        title=title,
+        cekura_result_id=cekura_result_id,
+        cekura_agent_id=cekura_agent_id,
+    )
+    write_report(model, out_dir.resolve(), write_html=write_html)
+    return model
 
 
 def render_fix_plan(model: dict[str, Any]) -> str:
@@ -935,21 +1080,78 @@ HTML_TEMPLATE = r"""<!doctype html>
       color: var(--ink);
       letter-spacing: 0;
     }
-    button, input {
+    button, input, textarea {
       font: inherit;
     }
     .app {
-      min-height: 100vh;
       display: grid;
+      grid-template-areas: "header header" "sidebar main";
       grid-template-rows: auto 1fr;
+      grid-template-columns: 220px 1fr;
+      min-height: 100vh;
     }
     header {
+      grid-area: header;
       background: #ffffff;
       border-bottom: 1px solid var(--line);
       padding: 18px 22px;
       position: sticky;
       top: 0;
       z-index: 4;
+    }
+    /* ── Sidebar ──────────────────────────────────────────────────────────── */
+    .sidebar {
+      grid-area: sidebar;
+      background: #0d1117;
+      border-right: 1px solid #21262d;
+      padding: 16px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      overflow-y: auto;
+    }
+    .sidebar-label {
+      padding: 0 14px 8px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+      color: #6e7681;
+    }
+    .sidebar-agent {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 14px;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      color: #8b949e;
+      font-size: 13px;
+      line-height: 1.3;
+      background: transparent;
+      border-top: 0;
+      border-right: 0;
+      border-bottom: 0;
+      text-align: left;
+      width: 100%;
+    }
+    .sidebar-agent:hover {
+      background: rgba(255,255,255,0.04);
+      color: #c9d1d9;
+    }
+    .sidebar-agent.active {
+      border-left-color: #1f6feb;
+      background: rgba(31, 111, 235, 0.1);
+      color: #c9d1d9;
+    }
+    .sidebar-agent-icon {
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+    .sidebar-agent-name {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .header-row {
       max-width: 1440px;
@@ -972,6 +1174,23 @@ HTML_TEMPLATE = r"""<!doctype html>
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
+      align-items: center;
+    }
+    .agent-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(86, 211, 100, 0.1);
+      border: 1px solid rgba(86, 211, 100, 0.3);
+      border-radius: 20px;
+      padding: 2px 9px 2px 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #56d364;
+    }
+    .agent-badge-dot {
+      font-size: 8px;
+      line-height: 1;
     }
     .toolbar {
       display: flex;
@@ -1000,13 +1219,44 @@ HTML_TEMPLATE = r"""<!doctype html>
       background: var(--teal);
       color: #fff;
     }
+    .refresh-button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      min-height: 36px;
+      padding: 8px 11px;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .refresh-button:hover:not(:disabled) {
+      border-color: var(--teal);
+      color: var(--teal);
+    }
+    .refresh-button:disabled {
+      cursor: not-allowed;
+      color: var(--muted);
+      background: #f5f7f4;
+    }
+    .refresh-status {
+      color: var(--muted);
+      font-size: 12px;
+      max-width: 220px;
+      overflow-wrap: anywhere;
+    }
+    .refresh-status.error {
+      color: var(--red);
+    }
+    .refresh-status.success {
+      color: var(--green);
+    }
     main {
-      max-width: 1440px;
-      width: 100%;
-      margin: 0 auto;
+      grid-area: main;
+      min-width: 0;
       padding: 18px 22px 28px;
       display: grid;
       gap: 16px;
+      align-content: start;
     }
     .kpis {
       display: grid;
@@ -1019,27 +1269,32 @@ HTML_TEMPLATE = r"""<!doctype html>
       border-radius: 8px;
       box-shadow: var(--shadow);
     }
+    .kpis {
+      align-items: start;
+    }
     .kpi {
-      padding: 14px;
-      min-height: 92px;
-      display: grid;
-      align-content: space-between;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
     }
     .kpi-label {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 0;
+      letter-spacing: 0.04em;
+      font-weight: 600;
     }
     .kpi-value {
-      font-size: 26px;
-      line-height: 1.1;
+      font-size: 28px;
+      line-height: 1.05;
       font-weight: 760;
-      margin-top: 8px;
+      margin-top: 2px;
     }
     .kpi small {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
+      margin-top: 1px;
     }
     .grid {
       display: grid;
@@ -1069,10 +1324,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .cluster-list {
       display: grid;
-      gap: 8px;
-      max-height: 640px;
+      gap: 6px;
+      max-height: 400px;
       overflow: auto;
-      padding: 10px;
+      padding: 8px;
     }
     .cluster-button {
       width: 100%;
@@ -1150,8 +1405,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .fix-list {
       display: grid;
-      gap: 10px;
-      max-height: 640px;
+      gap: 8px;
+      max-height: 400px;
       overflow: auto;
     }
     .fix-item {
@@ -1212,9 +1467,166 @@ HTML_TEMPLATE = r"""<!doctype html>
     .status-failure::before { background: var(--red); }
     .status-unknown::before { background: var(--amber); }
     .hidden { display: none !important; }
+    /* ── Call History ──────────────────────────────────────────────────────── */
+    .callhistory-layout {
+      display: flex;
+      height: calc(100vh - 180px);
+      min-height: 400px;
+    }
+    .callhistory-list {
+      width: 35%;
+      min-width: 200px;
+      border-right: 1px solid var(--line);
+      overflow-y: auto;
+      padding: 8px 0;
+    }
+    .callhistory-detail {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+    }
+    .call-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--line);
+      border-left: 3px solid transparent;
+    }
+    .call-row:hover { background: #f5f7f3; }
+    .call-row.active { border-left-color: var(--teal); background: #f1fbf8; }
+    .call-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      flex-shrink: 0;
+      margin-top: 4px;
+    }
+    .call-dot-green { background: var(--green); }
+    .call-dot-orange { background: var(--amber); }
+    .call-dot-blue { background: var(--blue); }
+    .call-row-info { min-width: 0; }
+    .call-row-title { font-weight: 650; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .call-row-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .transcript-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+    .transcript-bubbles { display: flex; flex-direction: column; gap: 10px; padding-bottom: 16px; }
+    .bubble {
+      max-width: 72%;
+      padding: 9px 12px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .bubble-user {
+      align-self: flex-end;
+      background: #d9ebff;
+      color: #17395e;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble-assistant {
+      align-self: flex-start;
+      background: #f1fbf8;
+      color: #1a3830;
+      border-bottom-left-radius: 4px;
+    }
+    .bubble-tool {
+      align-self: flex-start;
+      font-size: 11px;
+      font-style: italic;
+      color: var(--muted);
+      background: transparent;
+      padding: 2px 0;
+    }
+    .create-test-btn {
+      margin-top: auto;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+    .create-test-btn button {
+      padding: 7px 16px;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .create-test-btn button:hover { opacity: 0.82; }
+    /* ── New Test ──────────────────────────────────────────────────────────── */
+    .newtest-layout { padding: 20px; display: flex; flex-direction: column; gap: 20px; max-width: 700px; }
+    .newtest-generate-row { display: flex; gap: 10px; }
+    .newtest-generate-row input {
+      flex: 1;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      font-size: 14px;
+    }
+    .newtest-generate-row input:focus { outline: 2px solid var(--teal); border-color: transparent; }
+    .gen-btn {
+      padding: 9px 18px;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .gen-btn:hover { opacity: 0.82; }
+    .gen-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .generated-form { display: flex; flex-direction: column; gap: 14px; }
+    .gen-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--green);
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+    .gen-field { display: flex; flex-direction: column; gap: 5px; }
+    .gen-field label { font-size: 12px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .gen-field input, .gen-field textarea {
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      font-size: 13px;
+      resize: vertical;
+    }
+    .gen-field input:focus, .gen-field textarea:focus { outline: 2px solid var(--teal); border-color: transparent; }
+    .create-cekura-btn {
+      padding: 9px 20px;
+      background: #1f6feb;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 650;
+      font-size: 14px;
+      align-self: flex-start;
+    }
+    .create-cekura-btn:hover { opacity: 0.82; }
+    .create-cekura-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .newtest-status { font-size: 13px; padding: 8px 0; }
+    .newtest-status.error { color: var(--red); }
+    .newtest-status.success { color: var(--green); }
     @media (max-width: 1120px) {
       .grid { grid-template-columns: 1fr; }
       .kpis { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .app {
+        grid-template-areas: "header" "main";
+        grid-template-columns: 1fr;
+      }
+      .sidebar { display: none; }
+      .callhistory-layout { flex-direction: column; height: auto; }
+      .callhistory-list { width: 100%; border-right: none; border-bottom: 1px solid var(--line); }
     }
     @media (max-width: 640px) {
       header, main { padding-left: 14px; padding-right: 14px; }
@@ -1224,6 +1636,168 @@ HTML_TEMPLATE = r"""<!doctype html>
       h1 { font-size: 19px; }
       .kpi-value { font-size: 23px; }
     }
+    /* ── Heal Toast ─────────────────────────────────────────────────────── */
+    .heal-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      background: var(--panel);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 12px 16px;
+      min-width: 240px;
+      max-width: 360px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.35;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      border: 1.5px solid transparent;
+    }
+    .heal-toast.hidden { opacity: 0; transform: translateY(10px); pointer-events: none; }
+    .heal-toast.working { border-color: #fde68a; background: #fffbeb; color: var(--amber); }
+    .heal-toast.passed  { border-color: #86efac; background: #f0fdf4; color: var(--green); }
+    .heal-toast.failed  { border-color: #fca5a5; background: #fff1f0; color: var(--red);   }
+    .heal-pulse {
+      flex-shrink: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: healPulse 1.4s ease-in-out infinite;
+    }
+    @keyframes healPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.3; transform: scale(0.6); }
+    }
+    .heal-queue-pill {
+      margin-left: auto;
+      flex-shrink: 0;
+      border-radius: 10px;
+      padding: 1px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(0, 0, 0, 0.12);
+    }
+    /* ── Fix-item live states ──────────────────────────────────────────────── */
+    .fix-item-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .fix-spinner {
+      flex-shrink: 0;
+      width: 12px;
+      height: 12px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: fixSpin 0.75s linear infinite;
+    }
+    @keyframes fixSpin { to { transform: rotate(360deg); } }
+    .fix-dot {
+      flex-shrink: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: healPulse 1.4s ease-in-out infinite;
+    }
+    .fix-item-healing .fix-item-status { color: var(--amber); }
+    .fix-item-queued  .fix-item-status { color: #92640a; }
+    .fix-now-btn {
+      margin-top: 8px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .fix-now-btn:hover   { opacity: 0.82; }
+    .fix-now-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* ── Fix item action row ──────────────────────────────────────────────── */
+    .fix-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .resolve-btn {
+      padding: 5px 14px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .resolve-btn:hover   { opacity: 0.82; }
+    .resolve-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .done-btn {
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      background: transparent;
+      color: var(--muted);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .done-btn:hover { background: var(--border); color: var(--text); }
+    .fix-stale-hint {
+      font-size: 11px;
+      color: var(--amber);
+      margin-top: 4px;
+    }
+    .fix-item.is-done {
+      opacity: 0.45;
+    }
+    .fix-item.is-done .fix-actions { display: none; }
+    /* ── Heal step log ─────────────────────────────────────────────────────── */
+    .heal-steps {
+      margin-top: 10px;
+      font-size: 11px;
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+      background: rgba(0, 0, 0, 0.04);
+      border-radius: 6px;
+      padding: 8px 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scroll-behavior: smooth;
+    }
+    .heal-step {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      line-height: 1.4;
+    }
+    .heal-step-ts {
+      color: var(--muted);
+      flex-shrink: 0;
+      font-size: 10px;
+      min-width: 52px;
+    }
+    .heal-step-text { word-break: break-word; }
   </style>
 </head>
 <body>
@@ -1233,9 +1807,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div>
         <h1 id="page-title">__TITLE__</h1>
         <div class="subhead">
-          <span id="agent-name"></span>
+          <span class="agent-badge"><span class="agent-badge-dot">●</span> <span id="agent-name"></span></span>
           <span id="result-id"></span>
-          <span>Generated __GENERATED_AT__</span>
+          <span id="generated-at">Generated __GENERATED_AT__</span>
         </div>
       </div>
       <div class="toolbar">
@@ -1243,10 +1817,29 @@ HTML_TEMPLATE = r"""<!doctype html>
           <button class="active" data-view="overview">Overview</button>
           <button data-view="matrix">Matrix</button>
           <button data-view="runs">Runs</button>
+          <button data-view="callhistory">Call History</button>
+          <button data-view="newtest">New Test</button>
         </div>
+        <button id="refresh-button" class="refresh-button" type="button">Refresh</button>
+        <span id="refresh-status" class="refresh-status" aria-live="polite"></span>
       </div>
     </div>
   </header>
+  <nav class="sidebar" aria-label="Agents">
+    <div class="sidebar-label">Agents</div>
+    <button class="sidebar-agent active" data-agent-id="18021">
+      <span class="sidebar-agent-icon">💊</span>
+      <span class="sidebar-agent-name">Bayview Pharmacy</span>
+    </button>
+    <button class="sidebar-agent" data-agent-id="">
+      <span class="sidebar-agent-icon">🤖</span>
+      <span class="sidebar-agent-name">Voice Agent Auto-Improvement</span>
+    </button>
+    <button class="sidebar-agent" data-agent-id="">
+      <span class="sidebar-agent-icon">🛡️</span>
+      <span class="sidebar-agent-name">Voice Agent Scammer Detection</span>
+    </button>
+  </nav>
   <main>
     <section class="kpis" id="kpis"></section>
     <section class="grid view view-overview">
@@ -1271,17 +1864,132 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="panel-title"><h2>Run Facts</h2><span class="pill low">normalized evidence</span></div>
       <div class="panel-body matrix" id="runs"></div>
     </section>
+    <section class="panel view view-callhistory hidden">
+      <div class="panel-title"><h2>Call History</h2><span id="callhistory-count" class="pill low"></span></div>
+      <div class="callhistory-layout">
+        <div class="callhistory-list" id="callhistory-list">
+          <div class="transcript-empty">Loading…</div>
+        </div>
+        <div class="callhistory-detail" id="callhistory-detail">
+          <div class="transcript-empty">Select a call to view the transcript.</div>
+        </div>
+      </div>
+    </section>
+    <section class="panel view view-newtest hidden">
+      <div class="panel-title"><h2>New Test</h2></div>
+      <div class="newtest-layout">
+        <div class="newtest-generate-row">
+          <input type="text" id="newtest-description" placeholder="Describe the scenario, e.g. Caller is confused and asks for a pharmacist…" />
+          <button class="gen-btn" id="newtest-generate-btn" type="button">Generate →</button>
+        </div>
+        <div class="generated-form hidden" id="generated-form">
+          <div class="gen-label">✦ GENERATED — edit before submitting</div>
+          <div class="gen-field">
+            <label for="gen-name">Name</label>
+            <input type="text" id="gen-name" />
+          </div>
+          <div class="gen-field">
+            <label for="gen-persona">Persona</label>
+            <textarea id="gen-persona" rows="3"></textarea>
+          </div>
+          <div class="gen-field">
+            <label for="gen-pass-criteria">Pass Criteria</label>
+            <textarea id="gen-pass-criteria" rows="3"></textarea>
+          </div>
+          <button class="create-cekura-btn" id="create-cekura-btn" type="button">Create in Cekura →</button>
+        </div>
+        <div id="newtest-status" class="newtest-status" aria-live="polite"></div>
+      </div>
+    </section>
   </main>
+</div>
+<div id="heal-toast" class="heal-toast hidden" role="status" aria-live="polite">
+  <span id="heal-dot" class="heal-pulse" style="display:none"></span>
+  <span id="heal-msg" style="flex:1;min-width:0"></span>
+  <span id="heal-queue-pill" class="heal-queue-pill" style="display:none"></span>
 </div>
 <script id="dashboard-data" type="application/json">__DASHBOARD_JSON__</script>
 <script>
-const model = JSON.parse(document.getElementById("dashboard-data").textContent);
+let model = JSON.parse(document.getElementById("dashboard-data").textContent);
 let selectedClusterId = model.clusters[0]?.id || null;
+const apiAvailable = ["http:", "https:"].includes(window.location.protocol);
+const refreshTokenStorageKey = "bayviewDashboardRefreshToken";
 
 const severityClass = (value) => ["critical", "high", "medium", "low"].includes(value) ? value : "low";
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[char]));
+
+function readRefreshToken() {
+  const params = new URLSearchParams(window.location.search);
+  const queryToken = params.get("refresh_token") || params.get("dashboard_token");
+  if (queryToken) {
+    try {
+      window.localStorage.setItem(refreshTokenStorageKey, queryToken);
+    } catch (_) {}
+    params.delete("refresh_token");
+    params.delete("dashboard_token");
+    const cleanQuery = params.toString();
+    const cleanUrl = `${window.location.pathname}${cleanQuery ? `?${cleanQuery}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", cleanUrl);
+    return queryToken;
+  }
+  try {
+    return window.localStorage.getItem(refreshTokenStorageKey) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+const refreshToken = readRefreshToken();
+
+function setRefreshStatus(message, className = "") {
+  const status = document.getElementById("refresh-status");
+  status.textContent = message;
+  status.className = `refresh-status ${className}`.trim();
+}
+
+function renderHeader() {
+  const agentName = model.agent.name || "Unknown Agent";
+  document.getElementById("agent-name").textContent = agentName;
+  document.getElementById("result-id").textContent = model.agent.result_id ? `Result ${model.agent.result_id}` : "";
+  document.getElementById("generated-at").textContent = model.generated_at ? `Generated ${model.generated_at}` : "";
+}
+
+function renderAll() {
+  renderHeader();
+  renderKpis();
+  renderClusters();
+  renderClusterDetail(model.clusters.find((cluster) => cluster.id === selectedClusterId));
+  renderFixQueue();
+  renderMatrix();
+  renderRuns();
+}
+
+function replaceModel(nextModel) {
+  const previousClusterId = selectedClusterId;
+  model = nextModel;
+  selectedClusterId = model.clusters.find((cluster) => cluster.id === previousClusterId)?.id
+    || model.clusters[0]?.id
+    || null;
+  renderAll();
+  autoTriggerHeals();
+}
+
+async function autoTriggerHeals() {
+  if (!apiAvailable) return;
+  const open = model.fix_queue.filter((item) => !_doneItems.has(item.id));
+  for (const item of open) {
+    if (!item.scenario_names || item.scenario_names.length === 0) continue;
+    const alreadyQueued = _currentHealStatus?.queued_items?.some(
+      (q) => item.scenario_names.some((n) => n === q.scenario_name)
+    );
+    const inProgress = _currentHealStatus?.in_progress &&
+      item.scenario_names.includes(_currentHealStatus.in_progress.scenario_name);
+    if (alreadyQueued || inProgress) continue;
+    await triggerHeal(item.scenario_names, item.id, null, null);
+  }
+}
 
 function renderKpis() {
   const s = model.summary;
@@ -1364,24 +2072,190 @@ function renderClusterDetail(cluster) {
   `;
 }
 
-function renderFixQueue() {
-  const list = document.getElementById("fix-list");
-  document.getElementById("fix-count").textContent = `${model.fix_queue.length} fixes`;
-  if (!model.fix_queue.length) {
-    list.innerHTML = `<p>No fixes queued.</p>`;
+// ── Fix Queue live states ────────────────────────────────────────────────────
+let _currentHealStatus = null;
+
+function getFixItemState(item) {
+  if (!_currentHealStatus) return "idle";
+  const { in_progress, queued_items = [] } = _currentHealStatus;
+  const names = item.scenario_names || [];
+  if (in_progress && names.includes(in_progress.scenario_name)) return "healing";
+  const queuedNames = new Set(queued_items.map((q) => q.scenario_name));
+  if (names.some((n) => queuedNames.has(n))) return "queued";
+  return "idle";
+}
+
+function buildFixItem(item) {
+  const state = getFixItemState(item);
+  if (state !== "idle") _itemErrors.delete(item.id);
+  const div = document.createElement("div");
+  div.className = `fix-item fix-item-${state}`;
+
+  const top = document.createElement("div");
+  top.className = "cluster-top";
+  const h3 = document.createElement("h3");
+  h3.textContent = `P${item.priority} ${item.title}`;
+  const sev = document.createElement("span");
+  sev.className = `pill ${severityClass(item.severity)}`;
+  sev.textContent = item.severity;
+  top.appendChild(h3);
+  top.appendChild(sev);
+  div.appendChild(top);
+
+  const target = document.createElement("p");
+  const tStrong = document.createElement("strong");
+  tStrong.textContent = "Target: ";
+  target.appendChild(tStrong);
+  target.appendChild(document.createTextNode(item.target));
+  div.appendChild(target);
+
+  const action = document.createElement("p");
+  action.textContent = item.action;
+  div.appendChild(action);
+
+  const risk = document.createElement("p");
+  const rStrong = document.createElement("strong");
+  rStrong.textContent = "Regression risk: ";
+  risk.appendChild(rStrong);
+  risk.appendChild(document.createTextNode(item.regression_risk));
+  div.appendChild(risk);
+
+  if (state === "healing") {
+    const row = document.createElement("div");
+    row.className = "fix-item-status";
+    const spinner = document.createElement("span");
+    spinner.className = "fix-spinner";
+    row.appendChild(spinner);
+    row.appendChild(document.createTextNode("Fixing now…"));
+    div.appendChild(row);
+
+    const steps = _currentHealStatus?.in_progress?.steps || [];
+    if (steps.length > 0) {
+      const log = document.createElement("div");
+      log.className = "heal-steps";
+      for (const s of steps) {
+        const stepRow = document.createElement("div");
+        stepRow.className = "heal-step";
+        const ts = document.createElement("span");
+        ts.className = "heal-step-ts";
+        ts.textContent = new Date(s.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const text = document.createElement("span");
+        text.className = "heal-step-text";
+        text.textContent = s.text;
+        stepRow.appendChild(ts);
+        stepRow.appendChild(text);
+        log.appendChild(stepRow);
+      }
+      div.appendChild(log);
+      // Scroll to latest step
+      requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+    }
+  } else if (state === "queued") {
+    const row = document.createElement("div");
+    row.className = "fix-item-status";
+    const dot = document.createElement("span");
+    dot.className = "fix-dot";
+    row.appendChild(dot);
+    row.appendChild(document.createTextNode("Queued"));
+    div.appendChild(row);
+  } else {
+    // Idle — show action row
+    const actions = document.createElement("div");
+    actions.className = "fix-actions";
+
+    if (apiAvailable) {
+      const resolveBtn = document.createElement("button");
+      resolveBtn.className = "resolve-btn";
+      resolveBtn.type = "button";
+      resolveBtn.textContent = "⚡ Resolve";
+      resolveBtn.addEventListener("click", () => triggerHeal(item.scenario_names || [], item.id, resolveBtn, div));
+      actions.appendChild(resolveBtn);
+    }
+
+    const doneBtn = document.createElement("button");
+    doneBtn.className = "done-btn";
+    doneBtn.type = "button";
+    doneBtn.textContent = "✓ Mark Done";
+    doneBtn.addEventListener("click", () => markDone(item.id, div));
+    actions.appendChild(doneBtn);
+
+    div.appendChild(actions);
+
+    const errEntry = _itemErrors.get(item.id);
+    if (errEntry) {
+      if (Date.now() - errEntry.ts > 30000) {
+        _itemErrors.delete(item.id);
+      } else {
+        const errP = document.createElement("p");
+        errP.className = "fix-stale-hint";
+        errP.textContent = errEntry.msg;
+        div.appendChild(errP);
+      }
+    }
+  }
+
+  return div;
+}
+
+// ── Done-item tracking (localStorage) ───────────────────────────────────────
+const _DONE_KEY = "bayviewDoneItems";
+let _doneItems = new Set(JSON.parse(localStorage.getItem(_DONE_KEY) || "[]"));
+const _itemErrors = new Map(); // item.id → {msg, ts}; cleared on state change or after 30 s
+
+function markDone(itemId, divEl) {
+  _doneItems.add(itemId);
+  localStorage.setItem(_DONE_KEY, JSON.stringify([..._doneItems]));
+  if (divEl) divEl.classList.add("is-done");
+}
+
+async function triggerHeal(scenarioNames, itemId, buttonEl, _itemDiv) {
+  if (!scenarioNames || scenarioNames.length === 0) {
+    _itemErrors.set(itemId, { msg: "⚠ Click Refresh above to load scenario data, then try again.", ts: Date.now() });
+    renderFixQueue();
     return;
   }
-  list.innerHTML = model.fix_queue.map((item) => `
-    <div class="fix-item">
-      <div class="cluster-top">
-        <h3>P${escapeHtml(item.priority)} ${escapeHtml(item.title)}</h3>
-        <span class="pill ${severityClass(item.severity)}">${escapeHtml(item.severity)}</span>
-      </div>
-      <p><strong>Target:</strong> ${escapeHtml(item.target)}</p>
-      <p>${escapeHtml(item.action)}</p>
-      <p><strong>Regression risk:</strong> ${escapeHtml(item.regression_risk)}</p>
-    </div>
-  `).join("");
+  if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = "⏳ Queuing…"; }
+  try {
+    const res = await fetch("/api/trigger-heal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenario_names: scenarioNames }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) {
+      _itemErrors.set(itemId, { msg: `⚠ ${payload.error || "Heal request failed — is the webhook server running?"}`, ts: Date.now() });
+      renderFixQueue();
+    } else {
+      // Optimistically mark enqueued scenarios so the UI shows "Queued" immediately
+      if (!_currentHealStatus) {
+        _currentHealStatus = { queued_items: [], in_progress: null, last_result: null, queue_depth: 0 };
+      }
+      for (const e of (payload.enqueued || [])) {
+        if (!_currentHealStatus.queued_items.some((q) => q.scenario_name === e.scenario_name)) {
+          _currentHealStatus.queued_items.push(e);
+        }
+      }
+      _itemErrors.delete(itemId);
+      renderFixQueue();
+    }
+  } catch (err) {
+    _itemErrors.set(itemId, { msg: "⚠ Heal request failed — is the webhook server running?", ts: Date.now() });
+    renderFixQueue();
+  }
+}
+
+function renderFixQueue() {
+  const list = document.getElementById("fix-list");
+  const active = model.fix_queue.filter((item) => !_doneItems.has(item.id));
+  document.getElementById("fix-count").textContent = `${active.length} fixes`;
+  list.replaceChildren();
+  if (!active.length) {
+    list.appendChild(document.createTextNode("No fixes queued."));
+    return;
+  }
+  for (const item of active) {
+    list.appendChild(buildFixItem(item));
+  }
 }
 
 function statusMarkup(status) {
@@ -1446,20 +2320,397 @@ function setupViews() {
       button.classList.add("active");
       document.querySelectorAll(".view").forEach((view) => view.classList.add("hidden"));
       document.querySelector(`.view-${button.dataset.view}`).classList.remove("hidden");
+      if (button.dataset.view === "callhistory") {
+        loadCallHistory();
+      }
     });
   });
 }
 
-function init() {
-  document.getElementById("agent-name").textContent = model.agent.name || "Bayview Pharmacy";
-  document.getElementById("result-id").textContent = model.agent.result_id ? `Result ${model.agent.result_id}` : "";
-  renderKpis();
-  renderClusters();
-  renderClusterDetail(model.clusters.find((cluster) => cluster.id === selectedClusterId));
+// ── Call History ─────────────────────────────────────────────────────────────
+let _selectedCallId = null;
+
+async function loadCallHistory() {
+  if (!apiAvailable) {
+    document.getElementById("callhistory-list").innerHTML =
+      '<div class="transcript-empty">Call history requires the serve_dashboard.py server.</div>';
+    return;
+  }
+  try {
+    const res = await fetch("/api/transcripts", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const payload = await res.json();
+    if (!payload.ok) throw new Error(payload.error || "Unknown error");
+    renderCallList(payload.transcripts || []);
+  } catch (err) {
+    document.getElementById("callhistory-list").innerHTML =
+      `<div class="transcript-empty">Failed to load: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderCallList(transcripts) {
+  const list = document.getElementById("callhistory-list");
+  const count = document.getElementById("callhistory-count");
+  if (count) count.textContent = `${transcripts.length} calls`;
+  if (!transcripts.length) {
+    list.innerHTML = '<div class="transcript-empty">No call records found.</div>';
+    return;
+  }
+  list.innerHTML = transcripts.map((t) => {
+    let dotClass = "call-dot-blue";
+    if (t.source === "eval") {
+      dotClass = t.passed === true ? "call-dot-green" : t.passed === false ? "call-dot-orange" : "call-dot-blue";
+    }
+    const dateStr = t.timestamp ? new Date(t.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+    const durStr = t.duration_s != null ? `${t.duration_s}s` : "";
+    const sub = [t.source, dateStr, durStr].filter(Boolean).join(" · ");
+    return `
+      <div class="call-row${t.id === _selectedCallId ? " active" : ""}" data-call-id="${escapeHtml(t.id)}" data-call-idx="${transcripts.indexOf(t)}">
+        <span class="call-dot ${dotClass}"></span>
+        <div class="call-row-info">
+          <div class="call-row-title">${escapeHtml(t.title)}</div>
+          <div class="call-row-sub">${escapeHtml(sub)}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+  // Store transcript data for click handler
+  list._transcripts = transcripts;
+  list.querySelectorAll("[data-call-id]").forEach((row) => {
+    row.addEventListener("click", () => {
+      _selectedCallId = row.dataset.callId;
+      const idx = parseInt(row.dataset.callIdx, 10);
+      list.querySelectorAll(".call-row").forEach((r) => r.classList.remove("active"));
+      row.classList.add("active");
+      renderTranscript(list._transcripts[idx]);
+    });
+  });
+}
+
+function renderTranscript(t) {
+  const detail = document.getElementById("callhistory-detail");
+  if (!t || !t.transcript || t.transcript.length === 0) {
+    detail.innerHTML = '<div class="transcript-empty">No transcript data available for this call.</div>';
+    return;
+  }
+  const bubblesHtml = t.transcript.map((turn) => {
+    if (turn.role === "tool") {
+      return `<div class="bubble bubble-tool">🔧 ${escapeHtml(turn.name || "tool call")}</div>`;
+    }
+    const cls = turn.role === "user" ? "bubble-user" : "bubble-assistant";
+    return `<div class="bubble ${cls}">${escapeHtml(turn.content || "")}</div>`;
+  }).join("");
+  detail.innerHTML = `
+    <div class="transcript-bubbles">${bubblesHtml}</div>
+    <div class="create-test-btn">
+      <button id="create-from-call-btn" type="button">＋ Create test from this call</button>
+    </div>
+  `;
+  document.getElementById("create-from-call-btn").addEventListener("click", () => {
+    // Switch to New Test tab and pre-load transcript
+    _pendingTranscript = t.transcript.map((turn) =>
+      `${turn.role}: ${turn.content || ""}`
+    ).join("\n");
+    document.querySelectorAll("[data-view]").forEach((item) => item.classList.remove("active"));
+    document.querySelectorAll(".view").forEach((view) => view.classList.add("hidden"));
+    const newtestBtn = document.querySelector("[data-view='newtest']");
+    if (newtestBtn) newtestBtn.classList.add("active");
+    document.querySelector(".view-newtest").classList.remove("hidden");
+  });
+}
+
+// ── New Test ─────────────────────────────────────────────────────────────────
+let _pendingTranscript = "";
+
+function setupNewTest() {
+  const genBtn = document.getElementById("newtest-generate-btn");
+  const createBtn = document.getElementById("create-cekura-btn");
+  if (!genBtn || !createBtn) return;
+
+  genBtn.addEventListener("click", async () => {
+    const description = document.getElementById("newtest-description").value.trim();
+    if (!description) return;
+    genBtn.disabled = true;
+    genBtn.textContent = "Generating…";
+    document.getElementById("newtest-status").textContent = "";
+    document.getElementById("newtest-status").className = "newtest-status";
+    try {
+      const body = { description };
+      if (_pendingTranscript) body.transcript_context = _pendingTranscript;
+      const res = await fetch("/api/generate-scenario", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) throw new Error(payload.error || "Generation failed");
+      document.getElementById("gen-name").value = payload.name || "";
+      document.getElementById("gen-persona").value = payload.persona || "";
+      document.getElementById("gen-pass-criteria").value = payload.pass_criteria || "";
+      document.getElementById("generated-form").classList.remove("hidden");
+      _pendingTranscript = "";
+    } catch (err) {
+      const status = document.getElementById("newtest-status");
+      status.textContent = `Error: ${err.message}`;
+      status.className = "newtest-status error";
+    } finally {
+      genBtn.disabled = false;
+      genBtn.textContent = "Generate →";
+    }
+  });
+
+  createBtn.addEventListener("click", async () => {
+    const name = document.getElementById("gen-name").value.trim();
+    const persona = document.getElementById("gen-persona").value.trim();
+    const pass_criteria = document.getElementById("gen-pass-criteria").value.trim();
+    if (!name || !persona || !pass_criteria) {
+      const status = document.getElementById("newtest-status");
+      status.textContent = "Please fill in all fields before creating.";
+      status.className = "newtest-status error";
+      return;
+    }
+    createBtn.disabled = true;
+    createBtn.textContent = "Creating…";
+    document.getElementById("newtest-status").textContent = "";
+    document.getElementById("newtest-status").className = "newtest-status";
+    try {
+      const res = await fetch("/api/create-scenario", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, persona, pass_criteria }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload.ok) throw new Error(payload.error || "Create failed");
+      const status = document.getElementById("newtest-status");
+      status.textContent = `Scenario created! ID: ${payload.scenario_id}`;
+      status.className = "newtest-status success";
+      document.getElementById("generated-form").classList.add("hidden");
+      document.getElementById("newtest-description").value = "";
+    } catch (err) {
+      const status = document.getElementById("newtest-status");
+      status.textContent = `Error: ${err.message}`;
+      status.className = "newtest-status error";
+    } finally {
+      createBtn.disabled = false;
+      createBtn.textContent = "Create in Cekura →";
+    }
+  });
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function setupSidebar() {
+  document.querySelectorAll(".sidebar-agent").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".sidebar-agent").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+  // Highlight the active agent based on model.agent.name
+  const agentName = (model.agent.name || "").toLowerCase();
+  if (agentName.includes("bayview")) {
+    const bayviewBtn = document.querySelector(".sidebar-agent[data-agent-id='18021']");
+    if (bayviewBtn) bayviewBtn.classList.add("active");
+  }
+}
+
+async function loadServedReport() {
+  if (!apiAvailable) {
+    return;
+  }
+  try {
+    const response = await fetch(`report.json?cache=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) {
+      return;
+    }
+    const nextModel = await response.json();
+    if (nextModel && nextModel.generated_at && nextModel.generated_at !== model.generated_at) {
+      replaceModel(nextModel);
+      setRefreshStatus(`Loaded ${nextModel.generated_at}`, "success");
+    }
+  } catch (_) {}
+}
+
+async function refreshDashboard() {
+  const button = document.getElementById("refresh-button");
+  button.disabled = true;
+  setRefreshStatus("Refreshing Cekura...", "");
+  try {
+    const response = await fetch("api/refresh", {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "X-Dashboard-Refresh-Token": refreshToken
+      }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || `Refresh failed with HTTP ${response.status}`);
+    }
+    replaceModel(payload.model);
+    setRefreshStatus(`Updated ${payload.model.generated_at}`, "success");
+  } catch (error) {
+    setRefreshStatus(error.message || "Refresh failed", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setupRefresh() {
+  const button = document.getElementById("refresh-button");
+  if (!apiAvailable) {
+    button.disabled = true;
+    setRefreshStatus("Static snapshot", "");
+    return;
+  }
+  if (refreshToken) {
+    // Full Cekura API refresh — fetches latest run results
+    button.addEventListener("click", refreshDashboard);
+    setRefreshStatus("Ready", "");
+  } else {
+    // No token — reload local report.json only (no Cekura API call)
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      setRefreshStatus("Reloading…", "");
+      await loadServedReport();
+      button.disabled = false;
+      setRefreshStatus("", "");
+    });
+    setRefreshStatus("", "");
+  }
+}
+
+// ── Heal Status Toast ────────────────────────────────────────────────────
+let _healToastTimer = null;
+let _lastSeenCompletedAt = null;
+let _autoRefreshTimer = null;
+let _autoRefreshInterval = null;
+
+function scheduleAutoRefresh(delaySecs) {
+  clearTimeout(_autoRefreshTimer);
+  clearInterval(_autoRefreshInterval);
+  let remaining = delaySecs;
+  setRefreshStatus(`Auto-refreshing in ${remaining}s…`, "");
+  _autoRefreshInterval = setInterval(() => {
+    remaining -= 1;
+    if (remaining > 0) {
+      setRefreshStatus(`Auto-refreshing in ${remaining}s…`, "");
+    } else {
+      clearInterval(_autoRefreshInterval);
+    }
+  }, 1000);
+  _autoRefreshTimer = setTimeout(() => {
+    clearInterval(_autoRefreshInterval);
+    if (refreshToken) {
+      refreshDashboard();
+    } else {
+      loadServedReport();
+    }
+  }, delaySecs * 1000);
+}
+
+async function pollHealStatus() {
+  if (!apiAvailable) return;
+  try {
+    const res = await fetch("/api/heal-status", { cache: "no-store" });
+    if (!res.ok) return;
+    const payload = await res.json().catch(() => null);
+    if (payload && payload.ok) renderHealToast(payload.status);
+  } catch (_) {}
+}
+
+function renderHealToast(status) {
+  const toast = document.getElementById("heal-toast");
+  const dot   = document.getElementById("heal-dot");
+  const msg   = document.getElementById("heal-msg");
+  const pill  = document.getElementById("heal-queue-pill");
+  if (!toast) return;
+
+  _currentHealStatus = status || null;
   renderFixQueue();
-  renderMatrix();
-  renderRuns();
+
+  if (!status) { toast.className = "heal-toast hidden"; return; }
+
+  const { queue_depth = 0, in_progress, last_result } = status;
+
+  if (last_result && !in_progress && queue_depth === 0) {
+    // Auto-refresh dashboard once when a new heal result appears
+    if (last_result.completed_at !== _lastSeenCompletedAt) {
+      _lastSeenCompletedAt = last_result.completed_at;
+      scheduleAutoRefresh(5);
+    }
+    const age = Date.now() - new Date(last_result.completed_at).getTime();
+    if (age < 12000) {
+      clearTimeout(_healToastTimer);
+      toast.className = `heal-toast ${last_result.passed ? "passed" : "failed"}`;
+      dot.style.display = "none";
+      pill.style.display = "none";
+      msg.textContent = "";
+      const icon = document.createTextNode(last_result.passed ? "✅  Fixed: " : "❌  No improvement: ");
+      msg.appendChild(icon);
+      const label = last_result.scenario_name || `scenario ${last_result.scenario_id}`;
+      msg.appendChild(document.createTextNode(label));
+      if (last_result.pr_url) {
+        msg.appendChild(document.createTextNode(" — "));
+        const a = document.createElement("a");
+        a.href = last_result.pr_url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = "view PR";
+        a.style.cssText = "color:inherit;text-decoration:underline;font-weight:600";
+        msg.appendChild(a);
+      }
+      _healToastTimer = setTimeout(() => { toast.className = "heal-toast hidden"; }, 10000);
+      return;
+    }
+  }
+
+  clearTimeout(_healToastTimer);
+  _healToastTimer = null;
+
+  if (in_progress) {
+    toast.className = "heal-toast working";
+    dot.style.display = "block";
+    const elapsed = Math.round((Date.now() - new Date(in_progress.started_at).getTime()) / 1000);
+    const timeStr = elapsed > 4 ? ` (${elapsed}s)` : "";
+    const inName = in_progress.scenario_name || `scenario ${in_progress.scenario_id}`;
+    msg.textContent = `Healing: ${inName}${timeStr}`;
+    if (queue_depth > 1) {
+      pill.textContent = `+${queue_depth - 1} more`;
+      pill.style.display = "inline-block";
+    } else {
+      pill.style.display = "none";
+    }
+    return;
+  }
+
+  if (queue_depth > 0) {
+    toast.className = "heal-toast working";
+    dot.style.display = "block";
+    msg.textContent = `${queue_depth} scenario${queue_depth !== 1 ? "s" : ""} queued for healing…`;
+    pill.style.display = "none";
+    return;
+  }
+
+  toast.className = "heal-toast hidden";
+}
+
+function setupHealPolling() {
+  if (!apiAvailable) return;
+  pollHealStatus();
+  setInterval(pollHealStatus, 3000);
+  // Poll report.json every 6s — picks up updates without needing a Cekura token
+  setInterval(loadServedReport, 6000);
+}
+
+function init() {
+  renderAll();
   setupViews();
+  setupRefresh();
+  setupSidebar();
+  setupNewTest();
+  loadServedReport();
+  setupHealPolling();
+  autoTriggerHeals();
 }
 
 init();
@@ -1470,20 +2721,33 @@ init();
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate the Bayview self-improvement dashboard.")
+    parser = argparse.ArgumentParser(description="Generate the Voice Agent self-improvement dashboard.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Cekura-style JSON or text report.")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output directory for dashboard files.")
-    parser.add_argument("--title", default="Bayview Pharmacy Self-Improvement Harness")
+    parser.add_argument("--title", default="Voice Agent Self-Improvement Harness")
+    parser.add_argument(
+        "--cekura-result-id",
+        help="Fetch a real Cekura result by id, or pass 'latest' to use the newest result for --cekura-agent-id.",
+    )
+    parser.add_argument(
+        "--cekura-agent-id",
+        type=int,
+        default=18021,
+        help="Agent ID used when --cekura-result-id latest is provided.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    input_path = args.input.resolve()
     out_dir = args.out.resolve()
-    payload = load_input(input_path)
-    model = build_model(payload, input_path, args.title)
-    write_report(model, out_dir)
+    generate_dashboard(
+        input_path=args.input,
+        out_dir=out_dir,
+        title=args.title,
+        cekura_result_id=args.cekura_result_id,
+        cekura_agent_id=args.cekura_agent_id,
+    )
     print(f"Wrote dashboard: {out_dir / 'index.html'}")
     print(f"Wrote normalized report: {out_dir / 'report.json'}")
     print(f"Wrote fix plan: {out_dir / 'fix_plan.md'}")

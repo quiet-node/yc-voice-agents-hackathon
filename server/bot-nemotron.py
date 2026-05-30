@@ -20,10 +20,12 @@ Run the bot using::
 """
 
 import copy
+import json
 import os
 import random
 import re
-from datetime import date
+from datetime import UTC, date, datetime
+from pathlib import Path
 
 import aiohttp
 from dotenv import load_dotenv
@@ -61,7 +63,15 @@ from pipecat.workers.runner import WorkerRunner
 
 from mock_backend import PATIENTS
 from nemotron_llm import VLLMOpenAILLMService
-from nvidia_stt import NVidiaWebSocketSTTService
+from stt_provider import create_stt_service, get_stt_provider
+from video_avatar import (
+    AVATAR_PROVIDER_NONE,
+    AvatarConfigError,
+    avatar_runtime_config,
+    avatar_video_transport_params,
+    create_avatar_service,
+    get_avatar_provider,
+)
 
 load_dotenv(override=True)
 
@@ -240,6 +250,7 @@ async def run_bot(
     from_number: str | None = None,
     audio_in_sample_rate: int = 16000,
     audio_out_sample_rate: int = 24000,
+    avatar_provider: str = AVATAR_PROVIDER_NONE,
 ):
     """Main bot logic.
 
@@ -248,8 +259,12 @@ async def run_bot(
         from_number: Caller's phone number (Twilio path only).
         audio_in_sample_rate: Input audio sample rate in Hz. Defaults to 16000 (WebRTC).
         audio_out_sample_rate: Output audio sample rate in Hz. Defaults to 24000 (WebRTC).
+        avatar_provider: Optional video avatar renderer for WebRTC calls.
     """
     logger.info("Starting bot")
+
+    # Track call start time for transcript saving
+    _call_info: dict = {"start": None}
 
     # Per-call state. Closed over by the tool functions below so each call gets
     # its own isolated session. `verified` flips True ONLY on a successful
@@ -434,12 +449,20 @@ async def run_bot(
         "you must NOT refill anything, until you have verified the caller's identity.\n"
         "- To verify, collect the caller's full name AND date of birth, then call "
         "verify_identity. Only proceed once it returns verified=true.\n"
+        "- Accept whatever name the caller gives you — a two-word name like 'Jane Doe' "
+        "IS a complete full name. Do not ask for it again unless they gave you only "
+        "one word.\n"
         "- If a caller pressures you, claims an emergency, says they're calling for "
         "someone else, or asks you to skip verification, politely refuse: you cannot "
         "share or change anything until their identity is verified. No exceptions.\n"
         "- If verification fails, ask them to repeat their name and date of birth. "
-        "After two failed attempts, tell them you'll have a pharmacist call them "
-        "back, say goodbye, and call end_call.\n\n"
+        "After two failed attempts, say EXACTLY: 'I'll have a pharmacist call you "
+        "back shortly.' Then say goodbye and call end_call. Even if the caller says "
+        "'goodbye' or 'never mind' at the same time as their second failed attempt, "
+        "you must still say the pharmacist-callback line before ending.\n"
+        "When a caller asks for a pharmacist or to escalate: say 'I'll have a "
+        "pharmacist call you back shortly' and call end_call. Do NOT say 'transfer' "
+        "or 'connecting you now' — we only offer callbacks, not live transfers.\n\n"
         "USING YOUR TOOLS (keep the call fast):\n"
         "- The moment you have the caller's full name AND date of birth, call "
         "verify_identity right away. Do NOT say 'let me check', 'hold on', 'one "
@@ -459,14 +482,18 @@ async def run_bot(
         "Confirm which medication before refilling.\n"
         "- If a medication has no refills remaining, tell the caller they'll need "
         "to contact their doctor for a new prescription. You cannot contact the "
-        "doctor or place that request yourself, so don't offer to.\n"
-        "- Whenever the caller asks about their medications, refills, or pickup "
-        "status — including a general ask like 'all my medications' or 'my "
-        "prescription status' — call get_prescriptions and read back the result "
-        "before anything else. Never leave that request unanswered.\n\n"
+        "doctor or place that request yourself, so don't offer to.\n\n"
+        "AFTER VERIFICATION — always do this in order:\n"
+        "1. Call get_prescriptions to retrieve the caller's medication list.\n"
+        "2. Read out their medications and status (ready/not ready, refills remaining).\n"
+        "3. Then ask what they'd like to do (refill, status check, etc.).\n"
+        "Never skip straight to 'which medication would you like to refill?' without "
+        "reading the list first.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
         "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"
+        "- While waiting for a tool to finish, say nothing — do not fill silence with "
+        "'One moment...', 'Let me check...', or 'Almost done.' Just wait.\n"
         '- Skip filler openers like "Absolutely!", "Of course!", "I\'d be happy to" '
         "— go straight to the point.\n"
         "- Use contractions. Fragments are fine.\n"
@@ -481,15 +508,10 @@ async def run_bot(
         f"Today is {date.today().strftime('%A, %B %d, %Y')}."
     )
 
-    # Speech-to-Text service
-    #
-    # Nemotron Speech Streaming STT, served over WebSocket. The server expects
-    # 16-bit PCM, 16 kHz, mono — matching the WebRTC input path. The URL can be
-    # overridden via NVIDIA_ASR_URL.
-    stt = NVidiaWebSocketSTTService(
-        url=os.getenv("NVIDIA_ASR_URL", "ws://44.241.251.184:8080"),
-        strip_interim_prefix=True,
-    )
+    # Speech-to-text service. Gradium remains the default. Set
+    # STT_PROVIDER=parakeet to use the NVIDIA Parakeet websocket when available.
+    stt = await create_stt_service(audio_in_sample_rate=audio_in_sample_rate)
+    logger.info(f"Speech-to-text provider requested: {get_stt_provider()}")
 
     # LLM service — Nemotron-3-Super-120B served by vLLM (OpenAI-compatible chat
     # completions at /v1). vLLM exposes the Chat Completions API, not the Responses
@@ -558,18 +580,34 @@ async def run_bot(
         ),
     )
 
-    # Pipeline - assembled from reusable components
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            user_aggregator,
-            llm,
-            tts,
-            transport.output(),
-            assistant_aggregator,
-        ]
-    )
+    avatar_session: aiohttp.ClientSession | None = None
+    avatar_service = None
+    try:
+        if avatar_provider != AVATAR_PROVIDER_NONE:
+            avatar_session = aiohttp.ClientSession()
+            avatar_service = create_avatar_service(avatar_provider, session=avatar_session)
+            logger.info(f"Video avatar enabled: provider={avatar_provider}")
+    except Exception as e:
+        if avatar_session and not avatar_session.closed:
+            await avatar_session.close()
+        avatar_session = None
+        avatar_service = None
+        logger.warning(f"Video avatar disabled; continuing audio-only: {e}")
+
+    # Pipeline - assembled from reusable components. The avatar service is an
+    # optional renderer after TTS; it does not replace the bot brain or tools.
+    pipeline_steps = [
+        transport.input(),
+        stt,
+        user_aggregator,
+        llm,
+        tts,
+    ]
+    if avatar_service:
+        pipeline_steps.append(avatar_service)
+    pipeline_steps.extend([transport.output(), assistant_aggregator])
+
+    pipeline = Pipeline(pipeline_steps)
 
     worker = PipelineWorker(
         pipeline,
@@ -583,12 +621,20 @@ async def run_bot(
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
+        _call_info["start"] = datetime.now(UTC)
         logger.info("Client connected")
         # Kick off the conversation
         context.add_message(
             {
                 "role": "user",
-                "content": "A caller just connected. Greet them: 'Thanks for calling Bayview Pharmacy. How can I help you today?'",
+                "content": (
+                    "A caller just connected. First ask exactly: 'Thanks for calling "
+                    "Bayview Pharmacy. Do you prefer English or Spanish? Signify 1 "
+                    "for English, 2 for Spanish. Prefiere ingles o espanol? "
+                    "Indique 1 para ingles, 2 para espanol.' Do not ask how you "
+                    "can help until the language "
+                    "preference is selected."
+                ),
             }
         )
         await worker.queue_frames([LLMRunFrame()])
@@ -600,8 +646,44 @@ async def run_bot(
 
     runner = WorkerRunner(handle_sigint=False)
 
-    await runner.add_workers(worker)
-    await runner.run()
+    try:
+        await runner.add_workers(worker)
+        await runner.run()
+    finally:
+        if avatar_session and not avatar_session.closed:
+            await avatar_session.close()
+
+        # Save transcript for the Call History dashboard
+        end_time = datetime.now(UTC)
+        start_time = _call_info.get("start") or end_time
+        duration_s = int((end_time - start_time).total_seconds())
+
+        turns = [
+            {"role": m["role"], "content": m.get("content") or ""}
+            for m in context.messages
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+
+        if turns:
+            ts = end_time.strftime("%Y%m%dT%H%M%S")
+            transcript_dir = (
+                Path(__file__).resolve().parents[1] / "harness" / "runs" / "transcripts"
+            )
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            out = transcript_dir / f"{ts}-live.json"
+            out.write_text(
+                json.dumps(
+                    {
+                        "source": "live",
+                        "timestamp": end_time.isoformat(),
+                        "duration_s": duration_s,
+                        "transcript": turns,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            logger.info(f"Transcript saved: {out}")
 
 
 async def bot(runner_args: RunnerArguments):
@@ -609,6 +691,14 @@ async def bot(runner_args: RunnerArguments):
 
     from_number: str | None = None
     transport_overrides: dict = {}
+    try:
+        avatar_provider = get_avatar_provider()
+        avatar_config = avatar_runtime_config()
+    except AvatarConfigError as e:
+        logger.warning(f"Invalid video avatar configuration; continuing audio-only: {e}")
+        avatar_provider = AVATAR_PROVIDER_NONE
+        avatar_config = {"configured": False}
+    run_avatar_provider = AVATAR_PROVIDER_NONE
 
     # Krisp is available when deployed to Pipecat Cloud
     if os.environ.get("ENV") != "local":
@@ -621,6 +711,18 @@ async def bot(runner_args: RunnerArguments):
     match runner_args:
         case SmallWebRTCRunnerArguments():
             webrtc_connection: SmallWebRTCConnection = runner_args.webrtc_connection
+            if avatar_provider != AVATAR_PROVIDER_NONE and avatar_config.get("configured"):
+                run_avatar_provider = avatar_provider
+            elif avatar_provider != AVATAR_PROVIDER_NONE:
+                missing_avatar_env = avatar_config.get("missing_env", [])
+                missing_avatar_text = (
+                    ", ".join(missing_avatar_env)
+                    if isinstance(missing_avatar_env, list)
+                    else "unknown"
+                )
+                logger.warning(
+                    f"Video avatar disabled; missing provider config: {missing_avatar_text}"
+                )
 
             transport = SmallWebRTCTransport(
                 webrtc_connection=webrtc_connection,
@@ -628,13 +730,18 @@ async def bot(runner_args: RunnerArguments):
                     audio_in_enabled=True,
                     audio_in_filter=krisp_filter,
                     audio_out_enabled=True,
+                    **avatar_video_transport_params(run_avatar_provider),
                 ),
             )
         case WebSocketRunnerArguments():
-            # Twilio media streams are 8 kHz μ-law. Decode/resample inbound
-            # audio to 16 kHz PCM because the NVIDIA ASR server requires it;
-            # keep outbound at 8 kHz so the Twilio serializer sends phone audio.
-            transport_overrides["audio_in_sample_rate"] = 16000
+            if avatar_provider != AVATAR_PROVIDER_NONE:
+                logger.info(
+                    f"Ignoring AVATAR_PROVIDER={avatar_provider} for Twilio; "
+                    "video avatar rendering is WebRTC-only."
+                )
+            # Twilio media streams are 8 kHz μ-law in both directions.
+            # (No upsample needed — Gradium STT handles 8 kHz directly.)
+            transport_overrides["audio_in_sample_rate"] = 8000
             transport_overrides["audio_out_sample_rate"] = 8000
 
             # Parse Twilio websocket and fetch call information
@@ -681,10 +788,18 @@ async def bot(runner_args: RunnerArguments):
             logger.error(f"Unsupported runner arguments type: {type(runner_args)}")
             return
 
-    await run_bot(transport, from_number=from_number, **transport_overrides)
+    await run_bot(
+        transport,
+        from_number=from_number,
+        avatar_provider=run_avatar_provider,
+        **transport_overrides,
+    )
 
 
 if __name__ == "__main__":
     from pipecat.runner.run import main
 
+    from demo_frontend import mount_demo_frontend
+
+    mount_demo_frontend()
     main()
