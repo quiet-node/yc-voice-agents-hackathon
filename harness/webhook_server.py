@@ -180,8 +180,7 @@ async def _worker(loop: asyncio.AbstractEventLoop) -> None:
         except Exception as exc:
             log.error("Heal failed for scenario %d: %s", scenario_id, exc)
         finally:
-            async with _lock:
-                _queued.discard(scenario_id)
+            _queued.discard(scenario_id)
             _queue.task_done()
 
 
@@ -219,7 +218,7 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main_async(port: int) -> None:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     asyncio.create_task(_worker(loop))
 
     app = web.Application()
