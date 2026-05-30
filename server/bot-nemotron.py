@@ -21,6 +21,7 @@ Run the bot using::
 
 import os
 import random
+import re
 from datetime import date
 
 import aiohttp
@@ -28,6 +29,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import EndTaskFrame, FunctionCallResultProperties, LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -38,6 +40,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import (
+    DailyRunnerArguments,
     RunnerArguments,
     SmallWebRTCRunnerArguments,
     WebSocketRunnerArguments,
@@ -49,9 +52,11 @@ from pipecat.services.gradium.tts import GradiumTTSService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
+from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
@@ -135,12 +140,35 @@ async def run_bot(
     # verify_identity; `failed_attempts` counts verification misses.
     call_state: dict = {"verified": False, "verified_name": None, "failed_attempts": 0}
 
-    def find_patient_by_name(full_name: str) -> dict | None:
-        name = full_name.strip().lower()
-        for (patient_name, _dob), record in PATIENTS.items():
-            if patient_name == name:
+    def _norm_name(s: str) -> str:
+        # Lowercase, drop non-letters, collapse whitespace — tolerant of STT noise.
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z ]", " ", s.lower())).strip()
+
+    def _name_matches(spoken: str, record_name: str) -> bool:
+        a, b = _norm_name(spoken), _norm_name(record_name)
+        if not a:
+            return False
+        # Equal, or one is a prefix of the other (handles STT truncation like
+        # "Jane Do" for "Jane Doe"), or every spoken token is in the record name.
+        if a == b or b.startswith(a) or a.startswith(b):
+            return True
+        return set(a.split()).issubset(set(b.split()))
+
+    def _dob_matches(spoken: str, record_dob: str) -> bool:
+        # Compare by digit sequence so separators/spacing don't matter, but the
+        # date itself must be exactly right (security: DOB stays a hard match).
+        return re.sub(r"\D", "", spoken) == re.sub(r"\D", "", record_dob)
+
+    def _find_patient(full_name: str, date_of_birth: str | None = None) -> dict | None:
+        for (patient_name, patient_dob), record in PATIENTS.items():
+            if date_of_birth is not None and not _dob_matches(date_of_birth, patient_dob):
+                continue
+            if _name_matches(full_name, patient_name):
                 return record
         return None
+
+    def find_patient_by_name(full_name: str) -> dict | None:
+        return _find_patient(full_name)
 
     # --- Tools the LLM can call ---------------------------------------------
 
@@ -159,8 +187,9 @@ async def run_bot(
                 Convert whatever the caller says (e.g. "April 12th, 1985") into
                 this format before calling.
         """
-        key = (full_name.strip().lower(), date_of_birth.strip())
-        if key in PATIENTS:
+        # DOB must match exactly (digit-for-digit); the name is matched tolerantly
+        # so a mis-transcribed name ("Jane Do" for "Jane Doe") still verifies.
+        if _find_patient(full_name, date_of_birth) is not None:
             call_state["verified"] = True
             call_state["verified_name"] = full_name.strip()
             await params.result_callback({"verified": True})
@@ -286,16 +315,27 @@ async def run_bot(
         "After two failed attempts, say EXACTLY: 'I'll have a pharmacist call you "
         "back shortly.' Then say goodbye and call end_call. Even if the caller says "
         "'goodbye' or 'never mind' at the same time as their second failed attempt, "
-        "you must still say the pharmacist-callback line before ending.\n\n"
+        "you must still say the pharmacist-callback line before ending.\n"
+        "When a caller asks for a pharmacist or to escalate: say 'I'll have a "
+        "pharmacist call you back shortly' and call end_call. Do NOT say 'transfer' "
+        "or 'connecting you now' — we only offer callbacks, not live transfers.\n\n"
+        "USING YOUR TOOLS (keep the call fast):\n"
+        "- The moment you have the caller's full name AND date of birth, call "
+        "verify_identity right away. Do NOT say 'let me check', 'hold on', 'one "
+        "moment', or 'verifying' first, and do NOT read the date back or explain "
+        "the format. Just call the tool, then speak the result.\n"
+        "- Same for get_prescriptions and refill_prescription: call the tool "
+        "immediately, don't announce it.\n"
+        "- Convert the date of birth to YYYY-MM-DD silently; never say the digits "
+        "out loud.\n"
+        "- Don't ask for the name or date of birth again once the caller has "
+        "given them.\n\n"
         "AFTER VERIFICATION — always do this in order:\n"
         "1. Call get_prescriptions to retrieve the caller's medication list.\n"
         "2. Read out their medications and status (ready/not ready, refills remaining).\n"
         "3. Then ask what they'd like to do (refill, status check, etc.).\n"
         "Never skip straight to 'which medication would you like to refill?' without "
         "reading the list first.\n\n"
-        "When a caller asks for a pharmacist or to escalate: say 'I'll have a "
-        "pharmacist call you back shortly' and call end_call. Do NOT say 'transfer' "
-        "or 'connecting you now' — we only offer callbacks, not live transfers.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
         "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"
@@ -377,8 +417,18 @@ async def run_bot(
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(),
-            user_turn_strategies=FilterIncompleteUserTurnStrategies(),
+            # start_secs=0.3 so brief backchannels ("okay") don't register as a
+            # turn start and interrupt the bot mid-reply.
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(start_secs=0.3)),
+            # Nemotron over-tags short verify answers (a name, a date of birth) as
+            # incomplete; the default 5s/10s waits caused multi-second dead air
+            # before every reply. Cut them so the bot answers promptly.
+            user_turn_strategies=FilterIncompleteUserTurnStrategies(
+                config=UserTurnCompletionConfig(
+                    incomplete_short_timeout=1.5,
+                    incomplete_long_timeout=2.5,
+                ),
+            ),
         ),
     )
 
@@ -530,6 +580,20 @@ async def bot(runner_args: RunnerArguments):
                     audio_out_enabled=True,
                     add_wav_header=False,
                     serializer=serializer,
+                ),
+            )
+        case DailyRunnerArguments():
+            # Pipecat Cloud starts WebRTC sessions (e.g. the playground and
+            # Cekura's pipecat_v2 test runs) over a Daily room. Same 16 kHz in /
+            # 24 kHz out defaults as SmallWebRTC, so no sample-rate overrides.
+            transport = DailyTransport(
+                runner_args.room_url,
+                runner_args.token,
+                "Bayview Pharmacy",
+                params=DailyParams(
+                    audio_in_enabled=True,
+                    audio_in_filter=krisp_filter,
+                    audio_out_enabled=True,
                 ),
             )
         case _:
