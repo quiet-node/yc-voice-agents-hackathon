@@ -226,6 +226,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001 - user-facing local server
                 errors.append(f"Failed to enqueue {name!r}: {exc}")
 
+        if errors and not enqueued:
+            self.send_json({"ok": False, "error": errors[0], "errors": errors}, status=502)
+            return
         self.send_json({"ok": True, "enqueued": enqueued, "errors": errors})
 
     def authorized(self, parsed: Any) -> bool:
@@ -248,12 +251,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Serve the Bayview dashboard with manual Cekura refresh.")
+    parser = argparse.ArgumentParser(description="Serve the Voice Agent dashboard with manual Cekura refresh.")
     parser.add_argument("--host", default="127.0.0.1", help="Host for the local dashboard server.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port for the local dashboard server.")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Dashboard run directory to serve.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Fallback input for first-time index generation.")
-    parser.add_argument("--title", default="Bayview Pharmacy Self-Improvement Harness")
+    parser.add_argument("--title", default="Voice Agent Self-Improvement Harness")
     parser.add_argument("--cekura-agent-id", type=int, default=18021, help="Cekura agent ID used for latest-result refresh.")
     parser.add_argument(
         "--refresh-token",

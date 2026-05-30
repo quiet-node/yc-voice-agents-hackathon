@@ -862,7 +862,7 @@ def infer_regression_risk(cluster: dict[str, Any]) -> str:
         return "Low: config-only, but watch cost and concurrency."
     if "Metric" in cluster["category"]:
         return "Low for agent behavior, medium for score comparability."
-    return "Medium: re-run the full Bayview scenario suite."
+    return "Medium: re-run the full scenario suite."
 
 
 def build_matrix(records: list[RunRecord]) -> list[dict[str, Any]]:
@@ -962,7 +962,7 @@ def write_report(model: dict[str, Any], out_dir: Path, *, write_html: bool = Tru
 def build_dashboard_model(
     *,
     input_path: Path = DEFAULT_INPUT,
-    title: str = "Bayview Pharmacy Self-Improvement Harness",
+    title: str = "Voice Agent Self-Improvement Harness",
     cekura_result_id: str | None = None,
     cekura_agent_id: int = 18021,
 ) -> dict[str, Any]:
@@ -978,7 +978,7 @@ def generate_dashboard(
     *,
     input_path: Path = DEFAULT_INPUT,
     out_dir: Path = DEFAULT_OUT,
-    title: str = "Bayview Pharmacy Self-Improvement Harness",
+    title: str = "Voice Agent Self-Improvement Harness",
     cekura_result_id: str | None = None,
     cekura_agent_id: int = 18021,
     write_html: bool = True,
@@ -1117,6 +1117,23 @@ HTML_TEMPLATE = r"""<!doctype html>
       display: flex;
       gap: 10px;
       flex-wrap: wrap;
+      align-items: center;
+    }
+    .agent-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(86, 211, 100, 0.1);
+      border: 1px solid rgba(86, 211, 100, 0.3);
+      border-radius: 20px;
+      padding: 2px 9px 2px 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #56d364;
+    }
+    .agent-badge-dot {
+      font-size: 8px;
+      line-height: 1;
     }
     .toolbar {
       display: flex;
@@ -1195,27 +1212,32 @@ HTML_TEMPLATE = r"""<!doctype html>
       border-radius: 8px;
       box-shadow: var(--shadow);
     }
+    .kpis {
+      align-items: start;
+    }
     .kpi {
-      padding: 14px;
-      min-height: 92px;
-      display: grid;
-      align-content: space-between;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
     }
     .kpi-label {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 0;
+      letter-spacing: 0.04em;
+      font-weight: 600;
     }
     .kpi-value {
-      font-size: 26px;
-      line-height: 1.1;
+      font-size: 28px;
+      line-height: 1.05;
       font-weight: 760;
-      margin-top: 8px;
+      margin-top: 2px;
     }
     .kpi small {
       color: var(--muted);
-      font-size: 12px;
+      font-size: 11px;
+      margin-top: 1px;
     }
     .grid {
       display: grid;
@@ -1245,10 +1267,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .cluster-list {
       display: grid;
-      gap: 8px;
-      max-height: 640px;
+      gap: 6px;
+      max-height: 400px;
       overflow: auto;
-      padding: 10px;
+      padding: 8px;
     }
     .cluster-button {
       width: 100%;
@@ -1326,8 +1348,8 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .fix-list {
       display: grid;
-      gap: 10px;
-      max-height: 640px;
+      gap: 8px;
+      max-height: 400px;
       overflow: auto;
     }
     .fix-item {
@@ -1571,7 +1593,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div>
         <h1 id="page-title">__TITLE__</h1>
         <div class="subhead">
-          <span id="agent-name"></span>
+          <span class="agent-badge"><span class="agent-badge-dot">●</span> <span id="agent-name"></span></span>
           <span id="result-id"></span>
           <span id="generated-at">Generated __GENERATED_AT__</span>
         </div>
@@ -1660,7 +1682,8 @@ function setRefreshStatus(message, className = "") {
 }
 
 function renderHeader() {
-  document.getElementById("agent-name").textContent = model.agent.name || "Bayview Pharmacy";
+  const agentName = model.agent.name || "Unknown Agent";
+  document.getElementById("agent-name").textContent = agentName;
   document.getElementById("result-id").textContent = model.agent.result_id ? `Result ${model.agent.result_id}` : "";
   document.getElementById("generated-at").textContent = model.generated_at ? `Generated ${model.generated_at}` : "";
 }
@@ -1780,6 +1803,7 @@ function getFixItemState(item) {
 
 function buildFixItem(item) {
   const state = getFixItemState(item);
+  if (state !== "idle") _itemErrors.delete(item.id);
   const div = document.createElement("div");
   div.className = `fix-item fix-item-${state}`;
 
@@ -1859,8 +1883,8 @@ function buildFixItem(item) {
       const resolveBtn = document.createElement("button");
       resolveBtn.className = "resolve-btn";
       resolveBtn.type = "button";
-      resolveBtn.innerHTML = "&#9889; Resolve";
-      resolveBtn.addEventListener("click", () => triggerHeal(item.scenario_names || [], resolveBtn, div));
+      resolveBtn.textContent = "⚡ Resolve";
+      resolveBtn.addEventListener("click", () => triggerHeal(item.scenario_names || [], item.id, resolveBtn, div));
       actions.appendChild(resolveBtn);
     }
 
@@ -1872,6 +1896,18 @@ function buildFixItem(item) {
     actions.appendChild(doneBtn);
 
     div.appendChild(actions);
+
+    const errEntry = _itemErrors.get(item.id);
+    if (errEntry) {
+      if (Date.now() - errEntry.ts > 30000) {
+        _itemErrors.delete(item.id);
+      } else {
+        const errP = document.createElement("p");
+        errP.className = "fix-stale-hint";
+        errP.textContent = errEntry.msg;
+        div.appendChild(errP);
+      }
+    }
   }
 
   return div;
@@ -1880,6 +1916,7 @@ function buildFixItem(item) {
 // ── Done-item tracking (localStorage) ───────────────────────────────────────
 const _DONE_KEY = "bayviewDoneItems";
 let _doneItems = new Set(JSON.parse(localStorage.getItem(_DONE_KEY) || "[]"));
+const _itemErrors = new Map(); // item.id → {msg, ts}; cleared on state change or after 30 s
 
 function markDone(itemId, divEl) {
   _doneItems.add(itemId);
@@ -1887,17 +1924,13 @@ function markDone(itemId, divEl) {
   if (divEl) divEl.classList.add("is-done");
 }
 
-async function triggerHeal(scenarioNames, buttonEl, itemDiv) {
+async function triggerHeal(scenarioNames, itemId, buttonEl, _itemDiv) {
   if (!scenarioNames || scenarioNames.length === 0) {
-    // Stale report — scenario IDs not loaded yet
-    const hint = document.createElement("p");
-    hint.className = "fix-stale-hint";
-    hint.textContent = "⚠ Click Refresh above to load scenario data, then try again.";
-    if (itemDiv && !itemDiv.querySelector(".fix-stale-hint")) itemDiv.appendChild(hint);
-    setTimeout(() => hint.remove(), 5000);
+    _itemErrors.set(itemId, { msg: "⚠ Click Refresh above to load scenario data, then try again.", ts: Date.now() });
+    renderFixQueue();
     return;
   }
-  if (buttonEl) { buttonEl.disabled = true; buttonEl.innerHTML = "&#8987; Queuing…"; }
+  if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = "⏳ Queuing…"; }
   try {
     const res = await fetch("/api/trigger-heal", {
       method: "POST",
@@ -1906,16 +1939,24 @@ async function triggerHeal(scenarioNames, buttonEl, itemDiv) {
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) {
-      if (buttonEl) { buttonEl.disabled = false; buttonEl.innerHTML = "&#9889; Resolve"; }
-      const hint = document.createElement("p");
-      hint.className = "fix-stale-hint";
-      hint.textContent = `⚠ ${payload.error || "Heal request failed — is the webhook server running?"}`;
-      if (itemDiv && !itemDiv.querySelector(".fix-stale-hint")) itemDiv.appendChild(hint);
-      setTimeout(() => hint.remove(), 6000);
+      _itemErrors.set(itemId, { msg: `⚠ ${payload.error || "Heal request failed — is the webhook server running?"}`, ts: Date.now() });
+      renderFixQueue();
+    } else {
+      // Optimistically mark enqueued scenarios so the UI shows "Queued" immediately
+      if (!_currentHealStatus) {
+        _currentHealStatus = { queued_items: [], in_progress: null, last_result: null, queue_depth: 0 };
+      }
+      for (const e of (payload.enqueued || [])) {
+        if (!_currentHealStatus.queued_items.some((q) => q.scenario_name === e.scenario_name)) {
+          _currentHealStatus.queued_items.push(e);
+        }
+      }
+      _itemErrors.delete(itemId);
+      renderFixQueue();
     }
-    // On success the next poll will flip the item to "queued" state automatically
   } catch (err) {
-    if (buttonEl) { buttonEl.disabled = false; buttonEl.innerHTML = "&#9889; Resolve"; }
+    _itemErrors.set(itemId, { msg: "⚠ Heal request failed — is the webhook server running?", ts: Date.now() });
+    renderFixQueue();
   }
 }
 
@@ -2048,13 +2089,21 @@ function setupRefresh() {
     setRefreshStatus("Static snapshot", "");
     return;
   }
-  if (!refreshToken) {
-    button.disabled = true;
-    setRefreshStatus("Refresh token required", "error");
-    return;
+  if (refreshToken) {
+    // Full Cekura API refresh — fetches latest run results
+    button.addEventListener("click", refreshDashboard);
+    setRefreshStatus("Ready", "");
+  } else {
+    // No token — reload local report.json only (no Cekura API call)
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      setRefreshStatus("Reloading…", "");
+      await loadServedReport();
+      button.disabled = false;
+      setRefreshStatus("", "");
+    });
+    setRefreshStatus("", "");
   }
-  button.addEventListener("click", refreshDashboard);
-  setRefreshStatus("Ready", "");
 }
 
 // ── Heal Status Toast ────────────────────────────────────────────────────
@@ -2066,7 +2115,6 @@ let _autoRefreshInterval = null;
 function scheduleAutoRefresh(delaySecs) {
   clearTimeout(_autoRefreshTimer);
   clearInterval(_autoRefreshInterval);
-  if (!refreshToken) return;
   let remaining = delaySecs;
   setRefreshStatus(`Auto-refreshing in ${remaining}s…`, "");
   _autoRefreshInterval = setInterval(() => {
@@ -2079,7 +2127,11 @@ function scheduleAutoRefresh(delaySecs) {
   }, 1000);
   _autoRefreshTimer = setTimeout(() => {
     clearInterval(_autoRefreshInterval);
-    refreshDashboard();
+    if (refreshToken) {
+      refreshDashboard();
+    } else {
+      loadServedReport();
+    }
   }, delaySecs * 1000);
 }
 
@@ -2173,6 +2225,8 @@ function setupHealPolling() {
   if (!apiAvailable) return;
   pollHealStatus();
   setInterval(pollHealStatus, 3000);
+  // Poll report.json every 6s — picks up updates without needing a Cekura token
+  setInterval(loadServedReport, 6000);
 }
 
 function init() {
@@ -2191,10 +2245,10 @@ init();
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate the Bayview self-improvement dashboard.")
+    parser = argparse.ArgumentParser(description="Generate the Voice Agent self-improvement dashboard.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Cekura-style JSON or text report.")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output directory for dashboard files.")
-    parser.add_argument("--title", default="Bayview Pharmacy Self-Improvement Harness")
+    parser.add_argument("--title", default="Voice Agent Self-Improvement Harness")
     parser.add_argument(
         "--cekura-result-id",
         help="Fetch a real Cekura result by id, or pass 'latest' to use the newest result for --cekura-agent-id.",
