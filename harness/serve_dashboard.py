@@ -272,6 +272,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/trigger-heal":
             self._handle_trigger_heal()
             return
+        if parsed.path == "/api/run-scenario":
+            self._handle_run_scenario()
+            return
         if parsed.path == "/api/generate-scenario":
             self._handle_generate_scenario()
             return
@@ -346,6 +349,47 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception:
             self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
             return None
+
+    def _handle_run_scenario(self) -> None:
+        """Trigger a Cekura test run for one or more scenarios (no healing)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        scenario_names: list[str] = body.get("scenario_names", [])
+        if not scenario_names:
+            self.send_json({"ok": False, "error": "scenario_names is required"}, status=400)
+            return
+
+        try:
+            id_map = _lookup_scenario_ids(scenario_names, self.server.state.cekura_agent_id)
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": f"Cekura lookup failed: {exc}"}, status=502)
+            return
+
+        scenarios = [{"scenario": id_map[n]} for n in scenario_names if n in id_map]
+        if not scenarios:
+            self.send_json({"ok": False, "error": "No matching scenarios found in Cekura"}, status=404)
+            return
+
+        api_key = env_value("CEKURA_API_KEY")
+        payload = json.dumps({"scenarios": scenarios, "frequency": 1}).encode()
+        req = urllib.request.Request(
+            f"{CEKURA_API_BASE}/test_framework/v1/scenarios/run_scenarios_pipecat_v2/",
+            data=payload,
+            headers={"Content-Type": "application/json", "X-CEKURA-API-KEY": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode())
+            self.send_json({"ok": True, "run_id": result.get("id")})
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")
+            self.send_json(
+                {"ok": False, "error": f"Cekura error {exc.code}: {body_text[:300]}"}, status=502
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(exc)}, status=500)
 
     def _handle_generate_scenario(self) -> None:
         body = self._read_json_body()
