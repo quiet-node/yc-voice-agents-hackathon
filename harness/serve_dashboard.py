@@ -434,7 +434,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Api-Key {cekura_api_key}",
+                "X-CEKURA-API-KEY": cekura_api_key,
             },
             method="POST",
         )
