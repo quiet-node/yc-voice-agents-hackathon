@@ -685,6 +685,27 @@ def self_heal(args: argparse.Namespace) -> HealResult:
 
 
 # ---------------------------------------------------------------------------
+# Callable entry point (no argparse — for use by webhook_server, etc.)
+# ---------------------------------------------------------------------------
+
+
+def run_heal(
+    scenario_id: int,
+    max_iterations: int = 3,
+    dry_run: bool = False,
+    no_deploy: bool = False,
+) -> HealResult:
+    """Callable entry point for webhook_server — no argparse required."""
+    ns = argparse.Namespace(
+        scenario=scenario_id,
+        max_iterations=max_iterations,
+        dry_run=dry_run,
+        no_deploy=no_deploy,
+    )
+    return self_heal(ns)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

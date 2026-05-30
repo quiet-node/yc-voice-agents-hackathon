@@ -49,3 +49,27 @@ def test_self_heal_raises_on_dirty_tree(monkeypatch):
     args = argparse.Namespace(scenario=1, max_iterations=1, dry_run=False, no_deploy=True)
     with pytest.raises(RuntimeError, match="Uncommitted changes"):
         self_heal.self_heal(args)
+
+
+def test_run_heal_passes_args_correctly(monkeypatch):
+    """run_heal() should call self_heal() with the right Namespace."""
+    captured = {}
+
+    def fake_self_heal(args):
+        captured["args"] = args
+        return self_heal.HealResult(
+            scenario_id=args.scenario,
+            iterations=0,
+            final_score=100,
+            passed=True,
+            pr_url=None,
+        )
+
+    monkeypatch.setattr(self_heal, "self_heal", fake_self_heal)
+    result = self_heal.run_heal(42, max_iterations=2, dry_run=True, no_deploy=True)
+
+    assert captured["args"].scenario == 42
+    assert captured["args"].max_iterations == 2
+    assert captured["args"].dry_run is True
+    assert captured["args"].no_deploy is True
+    assert result.scenario_id == 42
