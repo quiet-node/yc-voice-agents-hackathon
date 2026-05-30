@@ -6,5 +6,5 @@ agent_profile = "agent-1x"
 	audio_filter = "tel"
 
 [scaling]
-	min_agents = 12
+	min_agents = 1
 	max_agents = 20
