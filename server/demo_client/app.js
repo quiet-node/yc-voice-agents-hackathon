@@ -4,11 +4,21 @@ const MEDIAPIPE_MODULE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-visi
 const MEDIAPIPE_WASM_ROOT = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
 const MEDIAPIPE_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-tasks/object_detector/efficientdet_lite0_uint8.tflite";
+const MEDIAPIPE_GESTURE_MODEL_URL =
+  "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task";
 const VISUAL_DEMO_CATEGORIES = ["cup", "bottle"];
 const VISUAL_DETECTION_THRESHOLD = 0.25;
 const VISUAL_DETECTION_INTERVAL_MS = 1200;
 const VISUAL_DETECTION_WINDOW_MS = 4500;
 const VISUAL_DETECTION_REQUIRED_HITS = 1;
+const GESTURE_LANGUAGE_MAP = {
+  Victory: { language: "Spanish", code: "es" },
+  ILoveYou: { language: "Spanish", code: "es" },
+};
+const GESTURE_DETECTION_THRESHOLD = 0.55;
+const GESTURE_DETECTION_INTERVAL_MS = 500;
+const GESTURE_DETECTION_WINDOW_MS = 2200;
+const GESTURE_DETECTION_REQUIRED_HITS = 2;
 
 const state = {
   pc: null,
@@ -36,6 +46,7 @@ const state = {
   agentAudioRetryTimer: null,
   micHealthTimer: null,
   avatarConfigTimer: null,
+  visionFilesetPromise: null,
   visualDetector: null,
   visualDetectorPromise: null,
   visualDetectionTimer: null,
@@ -48,6 +59,17 @@ const state = {
   visualCanvas: null,
   visualCanvasContext: null,
   visualDetectorLoading: false,
+  gestureRecognizer: null,
+  gestureRecognizerPromise: null,
+  gestureDetectionTimer: null,
+  gestureDetectionHits: [],
+  gestureLanguagePending: false,
+  gestureLanguageSent: false,
+  gestureCueMessageShown: false,
+  gestureLastRunAt: 0,
+  gestureLastResult: null,
+  gestureRecognizerLoading: false,
+  activeLanguage: "English",
 };
 
 const elements = {
@@ -62,9 +84,11 @@ const elements = {
   previewMuteButton: document.getElementById("previewMuteButton"),
   previewCameraButton: document.getElementById("previewCameraButton"),
   previewVisualBadge: document.getElementById("previewVisualBadge"),
+  previewGestureBadge: document.getElementById("previewGestureBadge"),
   previewDetectionBox: document.getElementById("previewDetectionBox"),
   callDetectionBox: document.getElementById("callDetectionBox"),
   callVisualBadge: document.getElementById("callVisualBadge"),
+  callGestureBadge: document.getElementById("callGestureBadge"),
   agentAudioStatus: document.getElementById("agentAudioStatus"),
   audioRetryButton: document.getElementById("audioRetryButton"),
   speakerPermissionButton: document.getElementById("speakerPermissionButton"),
@@ -140,6 +164,9 @@ async function initPreview() {
     void loadVisualDetector().catch(() => {
       setVisualBadge("error", "Visual detection unavailable");
     });
+    void loadGestureRecognizer().catch(() => {
+      setGestureBadge("error", "Gesture detection unavailable");
+    });
     await refreshDevices();
     if (!state.localStream) {
       state.localStream = await getLocalMedia();
@@ -150,6 +177,7 @@ async function initPreview() {
     await startMicMeter(state.localStream);
     setPreviewMediaButtons();
     void startVisualDetection();
+    void startGestureDetection();
     setPreviewStatus("Ready to join", true);
     elements.joinButton.disabled = false;
   } catch (error) {
@@ -161,6 +189,8 @@ async function initPreview() {
 async function startCall() {
   try {
     state.visualObservationSent = false;
+    state.gestureLanguageSent = false;
+    state.gestureCueMessageShown = false;
     unlockAgentAudio();
     ensureMicEnabledForJoin();
     resetMessages("Connecting to the pharmacy agent...");
@@ -281,6 +311,7 @@ function wireDataChannel() {
     elements.sendButton.disabled = false;
     addUniqueMessage("system", "Transcript connected.");
     flushVisualObservation();
+    flushGestureLanguageRequest();
   });
 
   state.dc.addEventListener("message", async (event) => {
@@ -516,7 +547,8 @@ function isWordLevel(message) {
 function isInternalKickoffText(text) {
   return (
     text.startsWith("A caller just connected. Greet them:") ||
-    text.startsWith("VISUAL_CONTEXT:")
+    text.startsWith("VISUAL_CONTEXT:") ||
+    text.startsWith("GESTURE_CONTEXT:")
   );
 }
 
@@ -554,9 +586,12 @@ function togglePreviewCamera() {
   setCallMediaState();
   if (state.cameraEnabled) {
     void startVisualDetection();
+    void startGestureDetection();
   } else {
     stopVisualDetection();
+    stopGestureDetection();
     setVisualBadge("idle", "Camera off");
+    setGestureBadge("idle", "Camera off");
   }
 }
 
@@ -601,7 +636,10 @@ async function replaceInputTrack(kind) {
     if (newTrack) state.localStream.addTrack(newTrack);
     assignLocalStream(state.localStream);
     if (isAudio) await startMicMeter(state.localStream);
-    if (!isAudio) void startVisualDetection();
+    if (!isAudio) {
+      void startVisualDetection();
+      void startGestureDetection();
+    }
     if (state.connected) syncTrackStatus();
   } catch (error) {
     addUniqueMessage("system", error.message || String(error));
@@ -718,6 +756,7 @@ async function cleanup({ keepMedia = false } = {}) {
     elements.previewVideo.srcObject = null;
     elements.selfView.srcObject = null;
     stopVisualDetection();
+    stopGestureDetection();
     stopMicMeter();
   }
   elements.agentAudio.srcObject = null;
@@ -749,8 +788,12 @@ async function cleanup({ keepMedia = false } = {}) {
     visualObservationPending: false,
     visualObservationSent: false,
     visualCueMessageShown: false,
+    gestureLanguagePending: false,
+    gestureLanguageSent: false,
+    gestureCueMessageShown: false,
   });
   setVisualBadge("idle", "Visual detection ready");
+  setGestureBadge("idle", "Gesture detection ready");
 }
 
 function showCall() {
@@ -910,8 +953,8 @@ async function loadVisualDetector() {
     state.visualDetectorLoading = true;
     setVisualBadge("idle", "Visual detection loading");
     state.visualDetectorPromise = import(MEDIAPIPE_MODULE_URL).then(
-      async ({ FilesetResolver, ObjectDetector }) => {
-        const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_ROOT);
+      async ({ ObjectDetector }) => {
+        const vision = await loadVisionFileset();
         return ObjectDetector.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath: MEDIAPIPE_MODEL_URL,
@@ -930,6 +973,15 @@ async function loadVisualDetector() {
   } finally {
     state.visualDetectorLoading = false;
   }
+}
+
+async function loadVisionFileset() {
+  if (!state.visionFilesetPromise) {
+    state.visionFilesetPromise = import(MEDIAPIPE_MODULE_URL).then(({ FilesetResolver }) =>
+      FilesetResolver.forVisionTasks(MEDIAPIPE_WASM_ROOT)
+    );
+  }
+  return state.visionFilesetPromise;
 }
 
 function stopVisualDetection() {
@@ -1096,8 +1148,157 @@ function flushVisualObservation() {
   }
 }
 
+async function startGestureDetection() {
+  if (!state.localStream?.getVideoTracks()[0] || !state.cameraEnabled) {
+    setGestureBadge("idle", "Camera off");
+    return;
+  }
+
+  try {
+    await loadGestureRecognizer();
+    if (!state.gestureRecognizer || state.gestureDetectionTimer) return;
+    setGestureBadge("ready", "Gesture language ready");
+    state.gestureDetectionTimer = window.setTimeout(runGestureDetection, 300);
+  } catch {
+    setGestureBadge("error", "Gesture detection unavailable");
+  }
+}
+
+async function loadGestureRecognizer() {
+  if (state.gestureRecognizer) return state.gestureRecognizer;
+  if (!state.gestureRecognizerPromise) {
+    state.gestureRecognizerLoading = true;
+    setGestureBadge("idle", "Gesture detection loading");
+    state.gestureRecognizerPromise = import(MEDIAPIPE_MODULE_URL).then(
+      async ({ GestureRecognizer }) => {
+        const vision = await loadVisionFileset();
+        return GestureRecognizer.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: MEDIAPIPE_GESTURE_MODEL_URL,
+          },
+          runningMode: "VIDEO",
+          numHands: 1,
+          minHandDetectionConfidence: 0.45,
+          minHandPresenceConfidence: 0.45,
+          minTrackingConfidence: 0.45,
+        });
+      }
+    );
+  }
+
+  try {
+    state.gestureRecognizer = await state.gestureRecognizerPromise;
+    return state.gestureRecognizer;
+  } finally {
+    state.gestureRecognizerLoading = false;
+  }
+}
+
+function stopGestureDetection() {
+  if (state.gestureDetectionTimer) window.clearTimeout(state.gestureDetectionTimer);
+  state.gestureDetectionTimer = null;
+  state.gestureDetectionHits = [];
+}
+
+function runGestureDetection() {
+  state.gestureDetectionTimer = null;
+
+  const video = getVisualDetectionVideo();
+  if (!state.gestureRecognizer || !state.cameraEnabled || !video?.srcObject) {
+    return;
+  }
+
+  const now = performance.now();
+  if (
+    video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    video.videoWidth > 0 &&
+    now - state.gestureLastRunAt >= GESTURE_DETECTION_INTERVAL_MS
+  ) {
+    state.gestureLastRunAt = now;
+    const source = drawDetectionFrame(video);
+    if (source) {
+      const result = state.gestureRecognizer.recognizeForVideo(source.canvas, now);
+      handleGestureRecognition(result);
+    }
+  }
+
+  state.gestureDetectionTimer = window.setTimeout(
+    runGestureDetection,
+    GESTURE_DETECTION_INTERVAL_MS
+  );
+}
+
+function handleGestureRecognition(result) {
+  const gesture = result?.gestures?.[0]?.[0];
+  const label = gesture?.categoryName || "";
+  const score = Number(gesture?.score || 0);
+  state.gestureLastResult = label ? { label, score: score.toFixed(2) } : null;
+  if (state.gestureLanguageSent) return;
+
+  const languageCue = GESTURE_LANGUAGE_MAP[label];
+  if (!languageCue || score < GESTURE_DETECTION_THRESHOLD) {
+    if (!state.gestureLanguagePending && !state.gestureLanguageSent) {
+      setGestureBadge("ready", "Gesture language ready");
+    }
+    return;
+  }
+
+  const now = Date.now();
+  state.gestureDetectionHits.push(now);
+  state.gestureDetectionHits = state.gestureDetectionHits.filter(
+    (timestamp) => now - timestamp <= GESTURE_DETECTION_WINDOW_MS
+  );
+
+  if (state.gestureDetectionHits.length >= GESTURE_DETECTION_REQUIRED_HITS) {
+    handleLanguageGestureCue(languageCue, label, score);
+  } else {
+    setGestureBadge("ready", `${languageCue.language} gesture seen`);
+  }
+}
+
+function handleLanguageGestureCue(languageCue, label, score) {
+  state.activeLanguage = languageCue.language;
+  state.gestureLanguagePending = true;
+  setGestureBadge("detected", `${languageCue.language} requested`);
+  if (state.connected && !state.gestureCueMessageShown) {
+    addUniqueMessage("system", `Gesture cue: ${languageCue.language} requested.`);
+    state.gestureCueMessageShown = true;
+  }
+  window.__bayviewLastLanguageGesture = { ...languageCue, label, score };
+  flushGestureLanguageRequest();
+}
+
+function flushGestureLanguageRequest() {
+  if (!state.gestureLanguagePending || state.gestureLanguageSent || state.dc?.readyState !== "open") {
+    return;
+  }
+
+  const sent = sendRTVI("send-text", {
+    content:
+      `GESTURE_CONTEXT: The caller made a language preference gesture. Switch to ${state.activeLanguage} now and continue in ${state.activeLanguage} unless the caller asks to switch back. Say one brief sentence in ${state.activeLanguage} confirming you can help them in that language.`,
+    options: { run_immediately: true, audio_response: true },
+  });
+
+  if (sent) {
+    state.gestureLanguagePending = false;
+    state.gestureLanguageSent = true;
+    if (!state.gestureCueMessageShown) {
+      addUniqueMessage("system", `Gesture cue: ${state.activeLanguage} requested.`);
+      state.gestureCueMessageShown = true;
+    }
+  }
+}
+
 function setVisualBadge(status, text) {
   for (const badge of [elements.previewVisualBadge, elements.callVisualBadge]) {
+    badge.classList.remove("idle", "ready", "detected", "error");
+    badge.classList.add(status);
+    badge.lastElementChild.textContent = text;
+  }
+}
+
+function setGestureBadge(status, text) {
+  for (const badge of [elements.previewGestureBadge, elements.callGestureBadge]) {
     badge.classList.remove("idle", "ready", "detected", "error");
     badge.classList.add(status);
     badge.lastElementChild.textContent = text;
@@ -1160,6 +1361,17 @@ window.__bayviewVisualState = () => ({
   sent: state.visualObservationSent,
 });
 window.__bayviewTriggerVisualCue = () => handlePrescriptionBottleCue();
+window.__bayviewGestureState = () => ({
+  recognizerLoaded: Boolean(state.gestureRecognizer),
+  recognizerLoading: state.gestureRecognizerLoading,
+  detectingOn: elements.callShell.classList.contains("hidden") ? "preview" : "self-view",
+  lastGesture: state.gestureLastResult,
+  activeLanguage: state.activeLanguage,
+  pending: state.gestureLanguagePending,
+  sent: state.gestureLanguageSent,
+});
+window.__bayviewTriggerSpanishGesture = () =>
+  handleLanguageGestureCue({ language: "Spanish", code: "es" }, "debug", 1);
 window.__bayviewAudioState = () => {
   const audioTrack = state.localStream?.getAudioTracks()[0];
   const remoteTrack = elements.agentAudio.srcObject?.getAudioTracks?.()[0];

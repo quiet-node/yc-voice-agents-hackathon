@@ -387,6 +387,18 @@ button:disabled {
   top: 18px;
 }
 
+.visual-badge.gesture {
+  right: 16px;
+  left: auto;
+  top: 56px;
+}
+
+.visual-badge.call.gesture {
+  right: 18px;
+  left: auto;
+  top: 58px;
+}
+
 .visual-badge span:last-child {
   min-width: 0;
   overflow: hidden;

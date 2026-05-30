@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bayview Pharmacy</title>
-    <link rel="stylesheet" href="./styles.css?v=15" />
+    <link rel="stylesheet" href="./styles.css?v=16" />
   </head>
   <body>
     <main class="prejoin-shell" id="prejoinShell">
@@ -22,6 +22,10 @@
             <div class="visual-badge idle" id="previewVisualBadge">
               <span class="visual-dot"></span>
               <span>Visual detection loading</span>
+            </div>
+            <div class="visual-badge gesture idle" id="previewGestureBadge">
+              <span class="visual-dot"></span>
+              <span>Gesture detection loading</span>
             </div>
             <div class="detection-box hidden" id="previewDetectionBox">
               <span>Prescription bottle</span>
@@ -94,6 +98,10 @@
           <div class="visual-badge call idle" id="callVisualBadge">
             <span class="visual-dot"></span>
             <span>Visual detection ready</span>
+          </div>
+          <div class="visual-badge call gesture idle" id="callGestureBadge">
+            <span class="visual-dot"></span>
+            <span>Gesture detection ready</span>
           </div>
           <div class="video-grid">
             <article class="video-cell" aria-label="Bayview Agent video">
@@ -208,6 +216,6 @@
         </form>
       </aside>
     </main>
-    <script type="module" src="./app.js?v=15"></script>
+    <script type="module" src="./app.js?v=16"></script>
   </body>
 </html>
