@@ -178,7 +178,12 @@ def has_uncommitted_changes() -> bool:
 
 
 def run_scenario(scenario_id: int) -> int:
-    result = cekura_post("/scenarios/run_scenarios/", {"scenarios": [scenario_id]})
+    # Pipecat Cloud agents use pipecat_v2 — Cekura provisions sessions internally.
+    # The old /run_scenarios/ endpoint is for phone/SIP and requires room URLs.
+    result = cekura_post(
+        "/scenarios/run_scenarios_pipecat_v2/",
+        {"scenarios": [{"scenario": scenario_id}], "frequency": 1},
+    )
     run_id: int = result["id"]
     print(f"  → Cekura run started: ID {run_id}")
     return run_id
@@ -410,7 +415,7 @@ def deploy_and_wait(dry_run: bool = False) -> bool:
 
     try:
         proc = subprocess.Popen(
-            ["pc", "cloud", "deploy", "--yes"],
+            ["pc", "cloud", "deploy"],
             cwd=SERVER,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -420,18 +425,8 @@ def deploy_and_wait(dry_run: bool = False) -> bool:
             print(f"    {line}", end="", flush=True)
         proc.wait()
         if proc.returncode != 0:
-            # --yes flag may not exist; try piping y
-            print("  ↻ Retrying deploy without --yes (piping input)…")
-            proc2 = subprocess.run(
-                ["pc", "cloud", "deploy"],
-                input="y\n",
-                cwd=SERVER,
-                capture_output=True,
-                text=True,
-            )
-            if proc2.returncode != 0:
-                print(f"  ⚠  Deploy failed: {proc2.stderr[:200]}")
-                return False
+            print(f"  ⚠  Deploy failed (exit {proc.returncode})")
+            return False
     except FileNotFoundError:
         print("  ⚠  'pc' CLI not found — cannot deploy automatically.")
         print("     Run 'pc cloud deploy' manually, then re-run with --no-deploy.")
@@ -594,6 +589,7 @@ def self_heal(args: argparse.Namespace, step_callback: Callable[[str], None] | N
     dry_run: bool = args.dry_run
     no_deploy: bool = args.no_deploy
     auto_merge: bool = getattr(args, "auto_merge", False)
+    skip_clean_check: bool = getattr(args, "skip_clean_check", False)
 
     def step(msg: str) -> None:
         if step_callback:
@@ -603,7 +599,7 @@ def self_heal(args: argparse.Namespace, step_callback: Callable[[str], None] | N
     if base_branch == "HEAD":
         raise RuntimeError("Detached HEAD — check out a named branch first.")
 
-    if has_uncommitted_changes() and not dry_run:
+    if has_uncommitted_changes() and not dry_run and not skip_clean_check:
         raise RuntimeError(
             "Uncommitted changes in working tree.\n"
             "Commit or stash them before running self_heal so each patch is isolated.\n"
@@ -777,6 +773,7 @@ def run_heal(
         dry_run=dry_run,
         no_deploy=no_deploy,
         auto_merge=auto_merge,
+        skip_clean_check=True,  # webhook server runs continuously, unclean tree is normal
     )
     return self_heal(ns, step_callback=step_callback)
 

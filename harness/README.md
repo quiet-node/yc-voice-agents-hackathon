@@ -44,6 +44,35 @@ python3 harness/generate_dashboard.py \
   --out harness/runs/cekura-591106
 ```
 
+## Serve With Manual Refresh
+
+To keep the dashboard open and refresh Cekura data in place, run the local
+dashboard server:
+
+```bash
+python3 harness/serve_dashboard.py --cekura-agent-id 18021
+```
+
+Open the printed URL, then click **Refresh** after a new Cekura run completes.
+The browser calls the local server, the server fetches the latest Cekura result
+with `CEKURA_API_KEY`, and the page rerenders from the fresh `report.json`
+without a reload.
+
+If you expose the dashboard through ngrok, set `NGROK_DOMAIN` to the public
+domain. The server prints a matching ngrok URL with a `refresh_token` query
+parameter:
+
+```bash
+export NGROK_DOMAIN=prefashioned-jaspa-dillon.ngrok-free.dev
+python3 harness/serve_dashboard.py --cekura-agent-id 18021
+```
+
+`POST /api/refresh` requires that refresh token because an ngrok URL is public.
+You can set a stable token yourself with `DASHBOARD_REFRESH_TOKEN`; otherwise the
+server generates one each time it starts. Keep `CEKURA_API_KEY` server-side only.
+`NGROK_AUTH_TOKEN` and `NGROK_ID` are still useful for your ngrok process, but
+the dashboard server only reads `NGROK_DOMAIN` to print the public URL.
+
 ## Input Shape
 
 The best input is a JSON export with a top-level `runs`, `workflow_runs`,

@@ -28,6 +28,6 @@ echo ""
 # Trap to clean up ngrok on exit
 trap 'kill $NGROK_PID 2>/dev/null; echo "Stopped."' EXIT INT TERM
 
-# Start webhook server (foreground)
-cd "$ROOT"
-uv run --directory server python3 harness/webhook_server.py --port "$PORT"
+# Start webhook server (foreground) — cd into server/ so uv finds pyproject.toml
+cd "$ROOT/server"
+uv run python3 ../harness/webhook_server.py --port "$PORT"
