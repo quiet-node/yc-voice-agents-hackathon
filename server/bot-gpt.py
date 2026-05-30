@@ -19,6 +19,7 @@ Run the bot using::
     uv run bot-gpt.py
 """
 
+import copy
 import os
 import random
 from datetime import date
@@ -125,9 +126,16 @@ async def run_bot(
     # verify_identity; `failed_attempts` counts verification misses.
     call_state: dict = {"verified": False, "verified_name": None, "failed_attempts": 0}
 
+    # Each call gets its own deep copy of the patient records. refill_prescription
+    # mutates a prescription in place (decrements refills_remaining, clears
+    # `ready`); PATIENTS is a module-level dict and the worker process is reused
+    # across calls, so mutating the global would leak one caller's refill into the
+    # next call on the same worker. The copy keeps each call deterministic.
+    patients = copy.deepcopy(PATIENTS)
+
     def find_patient_by_name(full_name: str) -> dict | None:
         name = full_name.strip().lower()
-        for (patient_name, _dob), record in PATIENTS.items():
+        for (patient_name, _dob), record in patients.items():
             if patient_name == name:
                 return record
         return None
@@ -216,8 +224,9 @@ async def run_bot(
                 {
                     "ok": False,
                     "reason": (
-                        f"{rx['drug']} has no refills remaining. Offer to have the "
-                        "pharmacist review it for a new prescription."
+                        f"{rx['drug']} has no refills remaining. Tell the caller they'll "
+                        "need to contact their doctor for a new prescription. You cannot "
+                        "request it for them."
                     ),
                 }
             )
@@ -272,7 +281,10 @@ async def run_bot(
         "back, say goodbye, and call end_call.\n\n"
         "Once verified, use get_prescriptions to read their medications, refills "
         "remaining, and pickup status, and refill_prescription to refill one. "
-        "Confirm which medication before refilling.\n\n"
+        "Confirm which medication before refilling.\n"
+        "- If a medication has no refills remaining, tell the caller they'll need "
+        "to contact their doctor for a new prescription. You cannot contact the "
+        "doctor or place that request yourself, so don't offer to.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
         "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"

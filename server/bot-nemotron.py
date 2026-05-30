@@ -19,6 +19,7 @@ Run the bot using::
     uv run bot-nemotron.py
 """
 
+import copy
 import os
 import random
 import re
@@ -255,6 +256,14 @@ async def run_bot(
     # verify_identity; `failed_attempts` counts verification misses.
     call_state: dict = {"verified": False, "verified_name": None, "failed_attempts": 0}
 
+    # Each call gets its own deep copy of the patient records. refill_prescription
+    # mutates a prescription in place (decrements refills_remaining, clears
+    # `ready`); PATIENTS is a module-level dict and the worker process is reused
+    # across calls, so mutating the global would leak one caller's refill into the
+    # next call on the same worker (e.g. a later status check reporting 1 refill /
+    # not ready instead of 2 / ready). The copy keeps each call deterministic.
+    patients = copy.deepcopy(PATIENTS)
+
     def _norm_name(s: str) -> str:
         # Lowercase, drop non-letters, collapse whitespace — tolerant of STT noise.
         return re.sub(r"\s+", " ", re.sub(r"[^a-z ]", " ", s.lower())).strip()
@@ -279,7 +288,7 @@ async def run_bot(
         return re.sub(r"\D", "", spoken) == re.sub(r"\D", "", record_dob)
 
     def _find_patient(full_name: str, date_of_birth: str | None = None) -> dict | None:
-        for (patient_name, patient_dob), record in PATIENTS.items():
+        for (patient_name, patient_dob), record in patients.items():
             if date_of_birth is not None and not _dob_matches(date_of_birth, patient_dob):
                 continue
             if _name_matches(full_name, patient_name):
@@ -374,8 +383,9 @@ async def run_bot(
                 {
                     "ok": False,
                     "reason": (
-                        f"{rx['drug']} has no refills remaining. Offer to have the "
-                        "pharmacist review it for a new prescription."
+                        f"{rx['drug']} has no refills remaining. Tell the caller they'll "
+                        "need to contact their doctor for a new prescription. You cannot "
+                        "request it for them."
                     ),
                 }
             )
@@ -447,6 +457,9 @@ async def run_bot(
         "Once verified, use get_prescriptions to read their medications, refills "
         "remaining, and pickup status, and refill_prescription to refill one. "
         "Confirm which medication before refilling.\n"
+        "- If a medication has no refills remaining, tell the caller they'll need "
+        "to contact their doctor for a new prescription. You cannot contact the "
+        "doctor or place that request yourself, so don't offer to.\n"
         "- Whenever the caller asks about their medications, refills, or pickup "
         "status — including a general ask like 'all my medications' or 'my "
         "prescription status' — call get_prescriptions and read back the result "
