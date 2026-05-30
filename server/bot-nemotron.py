@@ -502,7 +502,7 @@ async def run_bot(
         "and tool-use rules.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
-        "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"
+        "- Ask ONE thing at a time. Get the name, then in your next spoken turn ask for the date of birth; if they gave a two-word full name, treat it as complete and move on to date of birth.\n"
         "- While waiting for a tool to finish, say nothing — do not fill silence with "
         "'One moment...', 'Let me check...', or 'Almost done.' Just wait.\n"
         '- Skip filler openers like "Absolutely!", "Of course!", "I\'d be happy to" '
@@ -798,6 +798,7 @@ async def bot(runner_args: RunnerArguments):
                     audio_in_enabled=True,
                     audio_in_filter=krisp_filter,
                     audio_out_enabled=True,
+                    vad_analyzer=SileroVADAnalyzer(params=VADParams(start_secs=0.3)),
                 ),
             )
         case _:
