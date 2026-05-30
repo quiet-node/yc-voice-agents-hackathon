@@ -28,7 +28,7 @@ import urllib.error
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "server"
@@ -307,6 +307,7 @@ def propose_patch(
     scenario_id: int,
     result: RunResult,
     iteration: int,
+    step_callback: Callable[[str], None] | None = None,
 ) -> PatchProposal | None:
     system_excerpt = _read_system_instruction(BOT_FILE)
     expected_outcomes = _fetch_scenario_expected_outcomes(scenario_id)
@@ -322,6 +323,8 @@ def propose_patch(
     )
 
     print("  🤖 Calling gpt-5.5 via token router to propose a fix…")
+    if step_callback:
+        step_callback(f"🤖 Asking LLM for a fix (iter {iteration})…")
     from openai import OpenAI
 
     client = OpenAI(base_url=_token_router_base_url(), api_key=_token_router_key())
@@ -357,6 +360,8 @@ def propose_patch(
         return None
 
     print(f"  💡 Rationale: {rationale}")
+    if step_callback:
+        step_callback(f"💡 {rationale}")
     return PatchProposal(find=find, replace=replace, rationale=rationale, iteration=iteration)
 
 
@@ -583,12 +588,16 @@ def open_pr(
 # ---------------------------------------------------------------------------
 
 
-def self_heal(args: argparse.Namespace) -> HealResult:
+def self_heal(args: argparse.Namespace, step_callback: Callable[[str], None] | None = None) -> HealResult:
     scenario_id: int = args.scenario
     max_iterations: int = args.max_iterations
     dry_run: bool = args.dry_run
     no_deploy: bool = args.no_deploy
     auto_merge: bool = getattr(args, "auto_merge", False)
+
+    def step(msg: str) -> None:
+        if step_callback:
+            step_callback(msg)
 
     base_branch = current_branch()
     if base_branch == "HEAD":
@@ -613,13 +622,20 @@ def self_heal(args: argparse.Namespace) -> HealResult:
 
     # ── Baseline run ────────────────────────────────────────────────────────
     print("── Step 1: Baseline run")
+    step("▶ Running baseline scenario…")
     run_id = run_scenario(scenario_id)
     baseline = poll_run(run_id)
     print(f"  Scenario : {baseline.scenario_name}")
     print(f"  EO score : {baseline.eo_score}%  |  main turns: {baseline.main_agent_turns}")
 
+    score_str = f"{baseline.eo_score}%" if baseline.eo_score is not None else "?"
+    step(f"Baseline: {score_str} — {len(baseline.failure_explanations)} failure(s)")
+    for exp in baseline.failure_explanations[:3]:
+        step(f"  · {exp[:120]}")
+
     if baseline.passed:
         print("  ✅ Already passing — nothing to do.")
+        step("✅ Already passing — nothing to do.")
         return HealResult(
             scenario_id=scenario_id,
             iterations=0,
@@ -633,6 +649,7 @@ def self_heal(args: argparse.Namespace) -> HealResult:
             "  ⚠  Agent produced 0 turns — this is an infrastructure/cold-start issue, "
             "not a prompt issue. Check deployment and retry."
         )
+        step("⚠ 0 agent turns — infra/cold-start issue, cannot heal")
         return HealResult(
             scenario_id=scenario_id,
             iterations=0,
@@ -653,9 +670,10 @@ def self_heal(args: argparse.Namespace) -> HealResult:
     for iteration in range(1, max_iterations + 1):
         print(f"\n── Step {iteration + 1}: Fix iteration {iteration}/{max_iterations}")
 
-        proposal = propose_patch(scenario_id, current_result, iteration)
+        proposal = propose_patch(scenario_id, current_result, iteration, step_callback=step_callback)
         if proposal is None:
             print("  ⚠  Could not generate a valid patch — stopping.")
+            step("⚠ LLM could not generate a valid patch — stopping.")
             break
 
         print(f"  find    : {proposal.find[:80]!r}")
@@ -667,33 +685,44 @@ def self_heal(args: argparse.Namespace) -> HealResult:
             continue
 
         if not apply_patch(proposal):
+            step(f"⚠ Patch text not found in {BOT_FILE.name} — stopping.")
             break
 
         patches_applied.append(proposal)
+        step(f"✓ Patch applied to {BOT_FILE.name}")
 
         # Deploy unless skipped
         if not no_deploy:
+            step("🚀 Deploying to Pipecat Cloud…")
             deployed = deploy_and_wait(dry_run=False)
             if not deployed:
                 print("  ⚠  Deploy failed — reverting patch and stopping.")
+                step("⚠ Deploy failed — reverting patch.")
                 revert_patch(proposal)
                 patches_applied.pop()
                 break
+            step("✓ Deployment ready")
         else:
             print("  ⏭  Skipping deploy (--no-deploy)")
 
         # Re-run the scenario
         print(f"  ↻ Re-running scenario {scenario_id}…")
+        step("↻ Re-running scenario…")
         run_id = run_scenario(scenario_id)
         current_result = poll_run(run_id)
         print(
             f"  EO score : {current_result.eo_score}%  |  main turns: {current_result.main_agent_turns}"
         )
+        iter_score = f"{current_result.eo_score}%" if current_result.eo_score is not None else "?"
 
         if current_result.passed:
             print(f"  ✅ Passed on iteration {iteration}!")
+            step(f"Score: {iter_score} ✅ passed!")
             break
 
+        step(f"Score: {iter_score} — still failing")
+        for exp in current_result.failure_explanations[:2]:
+            step(f"  · {exp[:120]}")
         print(f"  Still failing:")
         for line in current_result.failure_explanations:
             print(f"    {line}")
@@ -704,12 +733,16 @@ def self_heal(args: argparse.Namespace) -> HealResult:
 
     if current_result.passed and patches_applied and not dry_run:
         print(f"\n── Opening PR: {before_score}% → {final_score}%")
+        step(f"📝 Opening PR ({before_score}% → {final_score}%)…")
         pr_url = open_pr(patches_applied, baseline.scenario_name, before_score, final_score, base_branch, auto_merge=auto_merge)
+        if pr_url:
+            step(f"✅ PR created: {pr_url}")
     elif not current_result.passed and patches_applied and not dry_run:
         print(
             f"\n  ⚠  Score did not reach 100% after {len(patches_applied)} iteration(s). "
             f"Final: {final_score}%."
         )
+        step(f"❌ No improvement (final: {final_score}%) — reverting patches.")
         print("  Reverting patches — manual intervention needed.")
         for p in reversed(patches_applied):
             revert_patch(p)
@@ -735,6 +768,7 @@ def run_heal(
     dry_run: bool = False,
     no_deploy: bool = False,
     auto_merge: bool = False,
+    step_callback: Callable[[str], None] | None = None,
 ) -> HealResult:
     """Callable entry point for webhook_server — no argparse required."""
     ns = argparse.Namespace(
@@ -744,7 +778,7 @@ def run_heal(
         no_deploy=no_deploy,
         auto_merge=auto_merge,
     )
-    return self_heal(ns)
+    return self_heal(ns, step_callback=step_callback)
 
 
 # ---------------------------------------------------------------------------

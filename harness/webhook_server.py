@@ -45,7 +45,8 @@ log = logging.getLogger("webhook")
 # ---------------------------------------------------------------------------
 
 _queue: asyncio.Queue[int] = asyncio.Queue()
-_queued: set[int] = set()       # IDs currently queued OR in-progress
+_queued: set[int] = set()              # IDs currently queued OR in-progress
+_queued_names: dict[int, str] = {}     # ID → display name
 _lock: asyncio.Lock = asyncio.Lock()
 _heal_state: dict[str, Any] = {
     "in_progress": None,
@@ -77,9 +78,14 @@ def _webhook_secret() -> str:
 
 def _write_status() -> None:
     """Persist current heal state to disk so the dashboard can read it."""
+    queued_items = [
+        {"scenario_id": sid, "scenario_name": _queued_names.get(sid, "")}
+        for sid in _queued
+    ]
     status = {
         "updated_at": datetime.now(UTC).isoformat(),
         "queue_depth": _queue.qsize(),
+        "queued_items": queued_items,
         "in_progress": _heal_state["in_progress"],
         "last_result": _heal_state["last_result"],
     }
@@ -94,23 +100,24 @@ def _write_status() -> None:
 # Payload parsing
 # ---------------------------------------------------------------------------
 
-def _extract_failing_scenario_ids(data: dict[str, Any]) -> list[int]:
-    """Return scenario IDs from runs where success=False and no error_message."""
+def _extract_failing_scenarios(data: dict[str, Any]) -> list[tuple[int, str]]:
+    """Return (scenario_id, scenario_name) for runs where success=False and no error_message."""
     failing = []
     for run in data.get("runs", {}).values():
         if run.get("success"):
             continue
+        scenario = run.get("scenario", {})
         if run.get("error_message"):
-            scenario_name = run.get("scenario", {}).get("name", "?")
             log.warning(
                 "Skipping infra error for scenario '%s': %s",
-                scenario_name,
+                scenario.get("name", "?"),
                 run["error_message"][:100],
             )
             continue
-        scenario_id = run.get("scenario", {}).get("id")
+        scenario_id = scenario.get("id")
+        scenario_name = scenario.get("name", "")
         if scenario_id is not None:
-            failing.append(int(scenario_id))
+            failing.append((int(scenario_id), scenario_name))
     return failing
 
 
@@ -119,7 +126,7 @@ def _extract_failing_scenario_ids(data: dict[str, Any]) -> list[int]:
 # ---------------------------------------------------------------------------
 
 async def _enqueue_failing_async(payload: dict[str, Any]) -> None:
-    """Extract failing IDs and push new ones onto the queue."""
+    """Extract failing scenarios and push new ones onto the queue."""
     data = payload.get("data", {})
     success_rate: float = data.get("success_rate", 0.0)
 
@@ -127,19 +134,20 @@ async def _enqueue_failing_async(payload: dict[str, Any]) -> None:
         log.info("All scenarios passed (success_rate=%.1f) — nothing to heal.", success_rate)
         return
 
-    failing_ids = _extract_failing_scenario_ids(data)
-    if not failing_ids:
+    failing = _extract_failing_scenarios(data)
+    if not failing:
         log.info("No heal-eligible failures found in payload.")
         return
 
     async with _lock:
-        for sid in failing_ids:
+        for sid, name in failing:
             if sid in _queued:
                 log.info("Scenario %d already queued/in-progress — skipping.", sid)
                 continue
             _queued.add(sid)
+            _queued_names[sid] = name
             await _queue.put(sid)
-            log.info("Enqueued scenario %d for healing.", sid)
+            log.info("Enqueued scenario %d (%r) for healing.", sid, name)
         _write_status()
 
 
@@ -189,6 +197,30 @@ async def handle_webhook(request: web.Request) -> web.Response:
     return web.Response(status=status)
 
 
+async def handle_internal_enqueue(request: web.Request) -> web.Response:
+    """Loopback-only endpoint: manually enqueue a single scenario for healing."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Invalid JSON")
+
+    scenario_id = body.get("scenario_id")
+    scenario_name = body.get("scenario_name", "")
+    if not isinstance(scenario_id, int):
+        return web.Response(status=400, text="scenario_id must be an integer")
+
+    async with _lock:
+        if scenario_id in _queued:
+            return web.json_response({"ok": True, "message": "already queued"})
+        _queued.add(scenario_id)
+        _queued_names[scenario_id] = scenario_name
+        await _queue.put(scenario_id)
+        log.info("Manually enqueued scenario %d (%r).", scenario_id, scenario_name)
+        _write_status()
+
+    return web.json_response({"ok": True, "scenario_id": scenario_id})
+
+
 # ---------------------------------------------------------------------------
 # Serial worker
 # ---------------------------------------------------------------------------
@@ -198,15 +230,28 @@ async def _worker(loop: asyncio.AbstractEventLoop) -> None:
     log.info("Worker started — waiting for scenarios.")
     while True:
         scenario_id = await _queue.get()
-        log.info("▶  Healing scenario %d…", scenario_id)
+        scenario_name = _queued_names.get(scenario_id, "")
+        log.info("▶  Healing scenario %d (%r)…", scenario_id, scenario_name)
         result: HealResult | None = None
         _heal_state["in_progress"] = {
             "scenario_id": scenario_id,
+            "scenario_name": scenario_name,
             "started_at": datetime.now(UTC).isoformat(),
+            "steps": [],
         }
         _write_status()
+
+        def _step_cb(text: str) -> None:
+            state = _heal_state.get("in_progress")
+            if state is not None:
+                state.setdefault("steps", []).append({
+                    "ts": datetime.now(UTC).isoformat(),
+                    "text": text,
+                })
+                _write_status()
+
         try:
-            heal_fn = functools.partial(run_heal, scenario_id, auto_merge=True)
+            heal_fn = functools.partial(run_heal, scenario_id, auto_merge=True, step_callback=_step_cb)
             result = await loop.run_in_executor(None, heal_fn)
             _log_result(scenario_id, result)
         except Exception as exc:
@@ -215,11 +260,13 @@ async def _worker(loop: asyncio.AbstractEventLoop) -> None:
             _heal_state["in_progress"] = None
             _heal_state["last_result"] = {
                 "scenario_id": scenario_id,
+                "scenario_name": scenario_name,
                 "passed": result.passed if result is not None else False,
                 "pr_url": result.pr_url if result is not None else None,
                 "completed_at": datetime.now(UTC).isoformat(),
             }
             _queued.discard(scenario_id)
+            _queued_names.pop(scenario_id, None)
             _queue.task_done()
             _write_status()
 
@@ -263,6 +310,7 @@ async def main_async(port: int) -> None:
 
     app = web.Application()
     app.router.add_post("/webhook/cekura", handle_webhook)
+    app.router.add_post("/internal/enqueue", handle_internal_enqueue)
 
     runner = web.AppRunner(app)
     await runner.setup()

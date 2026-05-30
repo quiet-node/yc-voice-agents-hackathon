@@ -847,6 +847,7 @@ def build_fix_queue(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "confidence": cluster["confidence"],
                 "target": file_targets.get(cluster["change_type"], "manual review"),
                 "regression_risk": infer_regression_risk(cluster),
+                "scenario_names": cluster.get("scenarios", []),
             }
         )
     return queue
@@ -1445,6 +1446,77 @@ HTML_TEMPLATE = r"""<!doctype html>
       font-weight: 700;
       background: rgba(0, 0, 0, 0.12);
     }
+    /* ── Fix-item live states ──────────────────────────────────────────────── */
+    .fix-item-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .fix-spinner {
+      flex-shrink: 0;
+      width: 12px;
+      height: 12px;
+      border: 2px solid currentColor;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: fixSpin 0.75s linear infinite;
+    }
+    @keyframes fixSpin { to { transform: rotate(360deg); } }
+    .fix-dot {
+      flex-shrink: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: healPulse 1.4s ease-in-out infinite;
+    }
+    .fix-item-healing .fix-item-status { color: var(--amber); }
+    .fix-item-queued  .fix-item-status { color: #92640a; }
+    .fix-now-btn {
+      margin-top: 8px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .fix-now-btn:hover   { opacity: 0.82; }
+    .fix-now-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* ── Heal step log ─────────────────────────────────────────────────────── */
+    .heal-steps {
+      margin-top: 10px;
+      font-size: 11px;
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", monospace;
+      background: rgba(0, 0, 0, 0.04);
+      border-radius: 6px;
+      padding: 8px 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scroll-behavior: smooth;
+    }
+    .heal-step {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      line-height: 1.4;
+    }
+    .heal-step-ts {
+      color: var(--muted);
+      flex-shrink: 0;
+      font-size: 10px;
+      min-width: 52px;
+    }
+    .heal-step-text { word-break: break-word; }
   </style>
 </head>
 <body>
@@ -1648,24 +1720,133 @@ function renderClusterDetail(cluster) {
   `;
 }
 
+// ── Fix Queue live states ────────────────────────────────────────────────────
+let _currentHealStatus = null;
+
+function getFixItemState(item) {
+  if (!_currentHealStatus) return "idle";
+  const { in_progress, queued_items = [] } = _currentHealStatus;
+  const names = item.scenario_names || [];
+  if (in_progress && names.includes(in_progress.scenario_name)) return "healing";
+  const queuedNames = new Set(queued_items.map((q) => q.scenario_name));
+  if (names.some((n) => queuedNames.has(n))) return "queued";
+  return "idle";
+}
+
+function buildFixItem(item) {
+  const state = getFixItemState(item);
+  const div = document.createElement("div");
+  div.className = `fix-item fix-item-${state}`;
+
+  const top = document.createElement("div");
+  top.className = "cluster-top";
+  const h3 = document.createElement("h3");
+  h3.textContent = `P${item.priority} ${item.title}`;
+  const sev = document.createElement("span");
+  sev.className = `pill ${severityClass(item.severity)}`;
+  sev.textContent = item.severity;
+  top.appendChild(h3);
+  top.appendChild(sev);
+  div.appendChild(top);
+
+  const target = document.createElement("p");
+  const tStrong = document.createElement("strong");
+  tStrong.textContent = "Target: ";
+  target.appendChild(tStrong);
+  target.appendChild(document.createTextNode(item.target));
+  div.appendChild(target);
+
+  const action = document.createElement("p");
+  action.textContent = item.action;
+  div.appendChild(action);
+
+  const risk = document.createElement("p");
+  const rStrong = document.createElement("strong");
+  rStrong.textContent = "Regression risk: ";
+  risk.appendChild(rStrong);
+  risk.appendChild(document.createTextNode(item.regression_risk));
+  div.appendChild(risk);
+
+  if (state === "healing") {
+    const row = document.createElement("div");
+    row.className = "fix-item-status";
+    const spinner = document.createElement("span");
+    spinner.className = "fix-spinner";
+    row.appendChild(spinner);
+    row.appendChild(document.createTextNode("Fixing now…"));
+    div.appendChild(row);
+
+    const steps = _currentHealStatus?.in_progress?.steps || [];
+    if (steps.length > 0) {
+      const log = document.createElement("div");
+      log.className = "heal-steps";
+      for (const s of steps) {
+        const stepRow = document.createElement("div");
+        stepRow.className = "heal-step";
+        const ts = document.createElement("span");
+        ts.className = "heal-step-ts";
+        ts.textContent = new Date(s.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const text = document.createElement("span");
+        text.className = "heal-step-text";
+        text.textContent = s.text;
+        stepRow.appendChild(ts);
+        stepRow.appendChild(text);
+        log.appendChild(stepRow);
+      }
+      div.appendChild(log);
+      // Scroll to latest step
+      requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+    }
+  } else if (state === "queued") {
+    const row = document.createElement("div");
+    row.className = "fix-item-status";
+    const dot = document.createElement("span");
+    dot.className = "fix-dot";
+    row.appendChild(dot);
+    row.appendChild(document.createTextNode("Queued"));
+    div.appendChild(row);
+  } else if (apiAvailable && (item.scenario_names || []).length > 0) {
+    const btn = document.createElement("button");
+    btn.className = "fix-now-btn";
+    btn.type = "button";
+    btn.textContent = "Fix Now";
+    btn.addEventListener("click", () => triggerHeal(item.scenario_names, btn));
+    div.appendChild(btn);
+  }
+
+  return div;
+}
+
+async function triggerHeal(scenarioNames, buttonEl) {
+  if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = "Queuing…"; }
+  try {
+    const res = await fetch("/api/trigger-heal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenario_names: scenarioNames }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) {
+      console.error("trigger-heal failed:", payload.error);
+      if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = "Fix Now"; }
+    }
+  } catch (err) {
+    console.error("trigger-heal error:", err);
+    if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = "Fix Now"; }
+  }
+}
+
 function renderFixQueue() {
   const list = document.getElementById("fix-list");
   document.getElementById("fix-count").textContent = `${model.fix_queue.length} fixes`;
+  list.replaceChildren();
   if (!model.fix_queue.length) {
-    list.innerHTML = `<p>No fixes queued.</p>`;
+    list.appendChild(document.createTextNode("No fixes queued."));
     return;
   }
-  list.innerHTML = model.fix_queue.map((item) => `
-    <div class="fix-item">
-      <div class="cluster-top">
-        <h3>P${escapeHtml(item.priority)} ${escapeHtml(item.title)}</h3>
-        <span class="pill ${severityClass(item.severity)}">${escapeHtml(item.severity)}</span>
-      </div>
-      <p><strong>Target:</strong> ${escapeHtml(item.target)}</p>
-      <p>${escapeHtml(item.action)}</p>
-      <p><strong>Regression risk:</strong> ${escapeHtml(item.regression_risk)}</p>
-    </div>
-  `).join("");
+  for (const item of model.fix_queue) {
+    list.appendChild(buildFixItem(item));
+  }
 }
 
 function statusMarkup(status) {
@@ -1812,6 +1993,9 @@ function renderHealToast(status) {
   const pill  = document.getElementById("heal-queue-pill");
   if (!toast) return;
 
+  _currentHealStatus = status || null;
+  renderFixQueue();
+
   if (!status) { toast.className = "heal-toast hidden"; return; }
 
   const { queue_depth = 0, in_progress, last_result } = status;
@@ -1826,7 +2010,8 @@ function renderHealToast(status) {
       msg.textContent = "";
       const icon = document.createTextNode(last_result.passed ? "✅  Fixed: " : "❌  No improvement: ");
       msg.appendChild(icon);
-      msg.appendChild(document.createTextNode(`scenario ${last_result.scenario_id}`));
+      const label = last_result.scenario_name || `scenario ${last_result.scenario_id}`;
+      msg.appendChild(document.createTextNode(label));
       if (last_result.pr_url) {
         msg.appendChild(document.createTextNode(" — "));
         const a = document.createElement("a");
@@ -1850,7 +2035,8 @@ function renderHealToast(status) {
     dot.style.display = "block";
     const elapsed = Math.round((Date.now() - new Date(in_progress.started_at).getTime()) / 1000);
     const timeStr = elapsed > 4 ? ` (${elapsed}s)` : "";
-    msg.textContent = `Healing scenario ${in_progress.scenario_id}${timeStr}`;
+    const inName = in_progress.scenario_name || `scenario ${in_progress.scenario_id}`;
+    msg.textContent = `Healing: ${inName}${timeStr}`;
     if (queue_depth > 1) {
       pill.textContent = `+${queue_depth - 1} more`;
       pill.style.display = "inline-block";

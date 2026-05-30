@@ -17,6 +17,8 @@ import json
 import os
 import secrets
 import threading
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -25,8 +27,10 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from generate_dashboard import (
+    CEKURA_API_BASE,
     DEFAULT_INPUT,
     ROOT,
+    cekura_get,
     generate_dashboard,
     load_env_value,
     render_html,
@@ -38,6 +42,26 @@ DEFAULT_PORT = 8765
 
 def env_value(name: str) -> str:
     return os.environ.get(name) or load_env_value(name)
+
+
+def _lookup_scenario_ids(scenario_names: list[str], agent_id: int) -> dict[str, int]:
+    """Fetch scenarios from Cekura and return a name→id map for the requested names."""
+    api_key = env_value("CEKURA_API_KEY")
+    name_set = set(scenario_names)
+    found: dict[str, int] = {}
+    page = 1
+    while True:
+        query = urllib.parse.urlencode({"agent_id": agent_id, "page": page})
+        data = cekura_get(f"/test_framework/v1/scenarios/?{query}", api_key)
+        for scenario in data.get("results", []):
+            name = scenario.get("name", "")
+            sid = scenario.get("id")
+            if name in name_set and sid is not None:
+                found[name] = int(sid)
+        if not data.get("next"):
+            break
+        page += 1
+    return found
 
 
 def normalize_ngrok_domain(value: str) -> str:
@@ -145,6 +169,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/trigger-heal":
+            self._handle_trigger_heal()
+            return
         if parsed.path != "/api/refresh":
             self.send_error(404)
             return
@@ -156,6 +183,50 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True, "model": model})
         except Exception as exc:  # noqa: BLE001 - user-facing local server
             self.send_json({"ok": False, "error": str(exc)}, status=500)
+
+    def _handle_trigger_heal(self) -> None:
+        content_length = int(self.headers.get("Content-Length", 0))
+        body_bytes = self.rfile.read(content_length) if content_length else b""
+        try:
+            body = json.loads(body_bytes) if body_bytes else {}
+        except Exception:
+            self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
+            return
+
+        scenario_names: list[str] = body.get("scenario_names", [])
+        if not scenario_names:
+            self.send_json({"ok": False, "error": "scenario_names is required"}, status=400)
+            return
+
+        try:
+            id_map = _lookup_scenario_ids(scenario_names, self.server.state.cekura_agent_id)
+        except Exception as exc:  # noqa: BLE001 - user-facing local server
+            self.send_json({"ok": False, "error": f"Cekura lookup failed: {exc}"}, status=502)
+            return
+
+        enqueued = []
+        errors = []
+        for name in scenario_names:
+            sid = id_map.get(name)
+            if sid is None:
+                errors.append(f"Scenario not found in Cekura: {name!r}")
+                continue
+            try:
+                payload = json.dumps({"scenario_id": sid, "scenario_name": name}).encode()
+                req = urllib.request.Request(
+                    "http://127.0.0.1:8888/internal/enqueue",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    result = json.loads(resp.read())
+                    if result.get("ok"):
+                        enqueued.append({"scenario_id": sid, "scenario_name": name})
+            except Exception as exc:  # noqa: BLE001 - user-facing local server
+                errors.append(f"Failed to enqueue {name!r}: {exc}")
+
+        self.send_json({"ok": True, "enqueued": enqueued, "errors": errors})
 
     def authorized(self, parsed: Any) -> bool:
         expected = self.server.state.refresh_token
