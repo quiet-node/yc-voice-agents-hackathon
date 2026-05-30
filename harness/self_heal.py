@@ -455,12 +455,39 @@ def deploy_and_wait(dry_run: bool = False) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _run_full_suite_and_check() -> bool:
+    """Trigger a full Cekura suite re-run and return True if all scenarios pass."""
+    print("  🔄 Running full Cekura suite to check for regressions…")
+    try:
+        result = cekura_post("/results/run_all/", {"agent": CEKURA_AGENT_ID})
+        run_id = result["id"]
+        deadline = time.time() + 600  # 10 min timeout for full suite
+        data: dict = {}
+        while time.time() < deadline:
+            data = cekura_get(f"/results/{run_id}/")
+            if data.get("status") == "completed":
+                break
+            print(".", end="", flush=True)
+            time.sleep(POLL_INTERVAL_S)
+        print()
+        success_rate: float = data.get("success_rate", 0.0)
+        if success_rate >= 100.0:
+            print(f"  ✅ Full suite passed: {success_rate}%")
+            return True
+        print(f"  ⚠  Regression detected: {success_rate}% — not all scenarios pass")
+        return False
+    except Exception as exc:
+        print(f"  ⚠  Full suite re-run failed: {exc}")
+        return False
+
+
 def open_pr(
     proposals: list[PatchProposal],
     scenario_name: str,
     before_score: int | None,
     after_score: int,
     base_branch: str,
+    auto_merge: bool = False,
 ) -> str | None:
     slug = slugify(f"self-heal-{scenario_name}")
     branch_name = f"self-heal/{slug}-{int(time.time())}"
@@ -528,6 +555,18 @@ def open_pr(
         )
         pr_url = result.stdout.strip()
         print(f"  ✓ PR created: {pr_url}")
+        if auto_merge and pr_url:
+            print("  🔍 Checking for regressions before auto-merge…")
+            if _run_full_suite_and_check():
+                try:
+                    run_cmd(["gh", "pr", "merge", pr_url,
+                             "--squash", "--delete-branch", "--yes"])
+                    print(f"  ✅ Auto-merged: {pr_url}")
+                except subprocess.CalledProcessError as exc:
+                    print(f"  ⚠  Auto-merge failed: {(exc.stderr or '').strip()[:200]}")
+                    print("     PR left open for manual merge.")
+            else:
+                print("  ⚠  Regression detected — PR left open for manual review.")
         return pr_url
     except FileNotFoundError:
         print("  ⚠  'gh' not found — branch pushed, open PR manually.")
@@ -549,6 +588,7 @@ def self_heal(args: argparse.Namespace) -> HealResult:
     max_iterations: int = args.max_iterations
     dry_run: bool = args.dry_run
     no_deploy: bool = args.no_deploy
+    auto_merge: bool = getattr(args, "auto_merge", False)
 
     base_branch = current_branch()
     if base_branch == "HEAD":
@@ -664,7 +704,7 @@ def self_heal(args: argparse.Namespace) -> HealResult:
 
     if current_result.passed and patches_applied and not dry_run:
         print(f"\n── Opening PR: {before_score}% → {final_score}%")
-        pr_url = open_pr(patches_applied, baseline.scenario_name, before_score, final_score, base_branch)
+        pr_url = open_pr(patches_applied, baseline.scenario_name, before_score, final_score, base_branch, auto_merge=auto_merge)
     elif not current_result.passed and patches_applied and not dry_run:
         print(
             f"\n  ⚠  Score did not reach 100% after {len(patches_applied)} iteration(s). "
@@ -694,6 +734,7 @@ def run_heal(
     max_iterations: int = 3,
     dry_run: bool = False,
     no_deploy: bool = False,
+    auto_merge: bool = False,
 ) -> HealResult:
     """Callable entry point for webhook_server — no argparse required."""
     ns = argparse.Namespace(
@@ -701,6 +742,7 @@ def run_heal(
         max_iterations=max_iterations,
         dry_run=dry_run,
         no_deploy=no_deploy,
+        auto_merge=auto_merge,
     )
     return self_heal(ns)
 
