@@ -28,12 +28,16 @@ Cekura evaluation completes (any result with ≥1 failure)
 │     [run["scenario"]["id"]                   │
 │      for run in data["runs"].values()        │
 │      if not run["success"]]                  │
-│  4. Skip IDs already in _in_progress set     │
-│     (guarded by asyncio.Lock)                │
-│  5. asyncio.create_task per ID:              │
-│       loop.run_in_executor(None,             │
-│         run_heal, scenario_id)               │
-│  6. Return HTTP 200 immediately              │
+│  4. Enqueue failing IDs into asyncio.Queue    │
+│     (skip IDs already queued or in progress) │
+│  5. Return HTTP 200 immediately              │
+│                                              │
+│  Serial worker (single asyncio.Task,         │
+│  started once at server startup):            │
+│  · Pulls one scenario ID from queue          │
+│  · Runs run_heal() via run_in_executor       │
+│  · Logs result                               │
+│  · Pulls next — never two heals at once      │
 └───┬──────────────────────────────────────────┘
     │  ThreadPoolExecutor (blocking-safe)
     ▼
@@ -76,20 +80,24 @@ harness/runs/webhook-<timestamp>/scenario-<id>.json
   - `result.completed` with `success_rate >= 100.0` → log and return 200
   - Error runs (zero agent turns, all runs have `error_message`) → log infra issue, skip self-heal, return 200
   - Unknown `event_type` → log and return 200
-- **Deduplication:** in-memory `set[int]` of scenario IDs currently being healed, guarded by `asyncio.Lock` to prevent check-then-act races on near-simultaneous webhook deliveries
-- **Concurrency:** `asyncio.create_task(loop.run_in_executor(None, run_heal, id))` per scenario — `run_in_executor` offloads blocking `self_heal()` (subprocess calls, `time.sleep`, `urllib` I/O) to a thread pool so the aiohttp event loop stays responsive
-- **`_in_progress` cleanup:** always in a `finally` block inside the task wrapper so the scenario ID is released even if `run_heal()` raises an unexpected exception type:
+- **Serial execution — one scenario at a time:** the server processes exactly one heal at a time. Running multiple concurrent heals would interleave `bot-nemotron.py` patches, git branches, and Pipecat Cloud deploys, causing collisions. This is enforced by a single long-running `asyncio.Task` (the "worker") that drains an `asyncio.Queue` one item at a time.
+- **Queue + dedup:** incoming webhook scenario IDs are pushed onto an `asyncio.Queue`. A `set[int]` of already-queued-or-in-progress IDs (guarded by `asyncio.Lock`) prevents the same scenario from being enqueued twice. If a webhook arrives for a scenario already in the queue or being healed, it is silently dropped.
+- **Worker task:**
   ```python
-  async def _heal_task(scenario_id: int) -> None:
-      try:
-          result = await loop.run_in_executor(None, run_heal, scenario_id)
-          _log_result(result)
-      except Exception as exc:
-          logger.error("heal failed for scenario %d: %s", scenario_id, exc)
-      finally:
-          async with _in_progress_lock:
-              _in_progress.discard(scenario_id)
+  async def _worker() -> None:
+      while True:
+          scenario_id = await _queue.get()
+          try:
+              result = await loop.run_in_executor(None, run_heal, scenario_id)
+              _log_result(result)
+          except Exception as exc:
+              logger.error("heal failed for scenario %d: %s", scenario_id, exc)
+          finally:
+              async with _lock:
+                  _queued.discard(scenario_id)
+              _queue.task_done()
   ```
+- `run_in_executor` offloads the blocking `self_heal()` (subprocess calls, `time.sleep`, `urllib` I/O) to a thread pool so the aiohttp event loop stays responsive while a heal runs.
 - **Env loading:** calls the existing `_cekura_key()` / `_token_router_key()` / `_token_router_base_url()` helpers from `self_heal.py`, which already handle `.env` fallback parsing
 - **Logging:** results written to `harness/runs/webhook-<ISO-timestamp>/scenario-<id>.json`
 
