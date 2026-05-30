@@ -18,7 +18,7 @@ Always pass **`pipecat-v2`** explicitly. Cekura's provider enum has no `pipecat`
    pc cloud organizations select -o tuilux
    pc cloud agent status bayview-pharmacy
    ```
-   Want `min_agents` ≥ the scenario count and status showing that many "agents Ready." Currently `min_agents = 12` (set in `server/pcc-deploy.toml`).
+   Want `min_agents` ≥ the *effective* concurrency and status showing that many "agents Ready." Currently `min_agents = 1` (reverted after the eval to stop billing; bump it up in `server/pcc-deploy.toml` + redeploy before a run if you want a warm floor).
 
 ## The 2 questions the skill will ask, and what to answer
 
@@ -30,27 +30,18 @@ Always pass **`pipecat-v2`** explicitly. Cekura's provider enum has no `pipecat`
 
 Grounding is already handled: the agent description pins every passing scenario to Jane Doe / 1985-04-12, so autogen won't invent mismatched identities.
 
-## Run in batches of 3 (REQUIRED — avoids the latency flags)
+## Concurrency — let the org limit throttle it
 
-The agent is fast per call (LLM first-token ~150ms), but the **NVIDIA STT + Nemotron LLM endpoints are shared event GPUs**. Firing many calls at once queues them → some turns stall >10s and trip "Infrastructure Issues" (looks like "the agent went silent"). Cekura confirmed: **run at most 3 concurrent.**
+The bottleneck is the **shared NVIDIA STT + Nemotron LLM endpoints** (event GPUs): too many simultaneous calls queue → some turns stall >10s and trip "Infrastructure Issues" (looks like the agent went silent). Keep effective concurrency around **3**.
 
-`scenarios_run_pipecat_v2` has **no concurrency parameter**, so cap it by **how many scenario IDs you pass per run call**: pass **3 at a time**, wait for that result's `status == "completed"`, then submit the next 3. Same suite, chained in groups of 3.
+There is **no per-run or per-project concurrency parameter** (`scenarios_run_pipecat_v2` has none; project 5875 has no such field). Cekura enforces a **max-parallel limit at the org level** (org 4841, set to 3 by the Cekura team). If that's active for pipecat-v2, just **submit the whole suite in one run call** and it self-throttles to 3 at a time.
 
-```
-scenarios = [all your IDs]
-for batch in chunks_of_3(scenarios):
-    result = scenarios_run_pipecat_v2(scenarios=batch)      # 3 calls, 3 warm slots
-    poll results_retrieve(result.id) until status == "completed"
-# then merge the batch result_ids for the report
-```
-
-When running via Claude: just say "run these in batches of 3" — Claude chunks the IDs and polls each batch before the next.
+**Verify it's actually throttling (free — read it off the run you're already doing):** submit ≥4 scenarios, then check each run's `call_started_at`. If only 3 start together and the rest are staggered → the org limit works, submit all at once from now on. If all start within the same ~second → it isn't gating pipecat-v2, fall back to manual batching: pass **3 scenario IDs per `scenarios_run_pipecat_v2` call**, poll `results_retrieve` to `completed`, repeat. (Just tell Claude "run these in batches of 3".)
 
 ## What to expect
 
-- A suite of N tests runs as ⌈N/3⌉ batches; each batch ≈2–3 min. An 8-test suite ≈ 3 batches ≈ 8–10 min.
-- Each batch is its own `result_<id>` — the report aggregates across them.
-- With ≤3 concurrent, the >10s "Infrastructure Issues" flags disappear (proven: a solo call shows "No infrastructure issues detected").
+- Each `scenarios_run_pipecat_v2` call is one `result_<id>`; if you chunk the suite, the report aggregates across them.
+- With effective concurrency ≤3, the >10s "Infrastructure Issues" flags disappear (proven: a solo call shows "No infrastructure issues detected"); at 8-at-once they reappear.
 
 ## After the event — revert the warm floor (it bills continuously)
 
