@@ -59,6 +59,8 @@ from pipecat.workers.runner import WorkerRunner
 from mock_backend import PATIENTS
 from video_avatar import (
     AVATAR_PROVIDER_NONE,
+    AvatarConfigError,
+    avatar_runtime_config,
     avatar_video_transport_params,
     create_avatar_service,
     get_avatar_provider,
@@ -341,10 +343,12 @@ async def run_bot(
             avatar_session = aiohttp.ClientSession()
             avatar_service = create_avatar_service(avatar_provider, session=avatar_session)
             logger.info(f"Video avatar enabled: provider={avatar_provider}")
-    except Exception:
+    except Exception as e:
         if avatar_session and not avatar_session.closed:
             await avatar_session.close()
-        raise
+        avatar_session = None
+        avatar_service = None
+        logger.warning(f"Video avatar disabled; continuing audio-only: {e}")
 
     # Pipeline - assembled from reusable components. The avatar service is an
     # optional renderer after TTS; it does not replace the bot brain or tools.
@@ -403,7 +407,13 @@ async def bot(runner_args: RunnerArguments):
 
     from_number: str | None = None
     transport_overrides: dict = {}
-    avatar_provider = get_avatar_provider()
+    try:
+        avatar_provider = get_avatar_provider()
+        avatar_config = avatar_runtime_config()
+    except AvatarConfigError as e:
+        logger.warning(f"Invalid video avatar configuration; continuing audio-only: {e}")
+        avatar_provider = AVATAR_PROVIDER_NONE
+        avatar_config = {"configured": False}
     run_avatar_provider = AVATAR_PROVIDER_NONE
 
     # Krisp is available when deployed to Pipecat Cloud
@@ -417,7 +427,18 @@ async def bot(runner_args: RunnerArguments):
     match runner_args:
         case SmallWebRTCRunnerArguments():
             webrtc_connection: SmallWebRTCConnection = runner_args.webrtc_connection
-            run_avatar_provider = avatar_provider
+            if avatar_provider != AVATAR_PROVIDER_NONE and avatar_config.get("configured"):
+                run_avatar_provider = avatar_provider
+            elif avatar_provider != AVATAR_PROVIDER_NONE:
+                missing_avatar_env = avatar_config.get("missing_env", [])
+                missing_avatar_text = (
+                    ", ".join(missing_avatar_env)
+                    if isinstance(missing_avatar_env, list)
+                    else "unknown"
+                )
+                logger.warning(
+                    f"Video avatar disabled; missing provider config: {missing_avatar_text}"
+                )
 
             transport = SmallWebRTCTransport(
                 webrtc_connection=webrtc_connection,

@@ -35,6 +35,7 @@ const state = {
   agentVideoCheckTimer: null,
   agentAudioRetryTimer: null,
   micHealthTimer: null,
+  avatarConfigTimer: null,
   visualDetector: null,
   visualDetectorPromise: null,
   visualDetectionTimer: null,
@@ -55,6 +56,7 @@ const elements = {
   previewVideo: document.getElementById("previewVideo"),
   previewEmpty: document.getElementById("previewEmpty"),
   previewStatus: document.getElementById("previewStatus"),
+  avatarStatus: document.getElementById("avatarStatus"),
   previewMeter: document.getElementById("previewMeter"),
   joinButton: document.getElementById("joinButton"),
   previewMuteButton: document.getElementById("previewMuteButton"),
@@ -71,6 +73,7 @@ const elements = {
   agentAudio: document.getElementById("agentAudio"),
   selfView: document.getElementById("selfView"),
   stageEmpty: document.getElementById("stageEmpty"),
+  callAvatarStatus: document.getElementById("callAvatarStatus"),
   messages: document.getElementById("messages"),
   statusDot: document.getElementById("statusDot"),
   statusText: document.getElementById("statusText"),
@@ -113,7 +116,21 @@ window.addEventListener("beforeunload", () => void cleanup());
 
 if (navigator.mediaDevices?.enumerateDevices) {
   navigator.mediaDevices.addEventListener("devicechange", () => void refreshDevices());
+  void loadDemoConfig();
   void initPreview();
+}
+
+async function loadDemoConfig() {
+  try {
+    const response = await fetch("/demo/config", { cache: "no-store" });
+    if (!response.ok) throw new Error(`Config failed: ${response.status}`);
+    const config = await response.json();
+    setAvatarStatus(config.avatar);
+    return config;
+  } catch {
+    setAvatarStatus({ provider: "unknown", enabled: false, configured: false });
+    return null;
+  }
 }
 
 async function initPreview() {
@@ -148,6 +165,8 @@ async function startCall() {
     ensureMicEnabledForJoin();
     resetMessages("Connecting to the pharmacy agent...");
     showCall();
+    void loadDemoConfig();
+    startAvatarStatusPolling();
     setStatus("Requesting media");
     setButtons({ connecting: true });
     elements.joinButton.disabled = true;
@@ -682,11 +701,13 @@ async function cleanup({ keepMedia = false } = {}) {
   if (state.agentVideoCheckTimer) window.clearTimeout(state.agentVideoCheckTimer);
   if (state.agentAudioRetryTimer) window.clearTimeout(state.agentAudioRetryTimer);
   if (state.micHealthTimer) window.clearTimeout(state.micHealthTimer);
+  if (state.avatarConfigTimer) window.clearInterval(state.avatarConfigTimer);
   state.pingTimer = null;
   state.iceFlushTimer = null;
   state.agentVideoCheckTimer = null;
   state.agentAudioRetryTimer = null;
   state.micHealthTimer = null;
+  state.avatarConfigTimer = null;
   if (state.dc && state.dc.readyState !== "closed") state.dc.close();
   if (state.pc) state.pc.close();
   if (!keepMedia) {
@@ -719,6 +740,7 @@ async function cleanup({ keepMedia = false } = {}) {
     pingTimer: null,
     iceFlushTimer: null,
     micHealthTimer: null,
+    avatarConfigTimer: null,
     pendingCandidates: [],
     canSendIceCandidates: false,
     muted: false,
@@ -740,6 +762,8 @@ function showLobby() {
   elements.callShell.classList.add("hidden");
   elements.prejoinShell.classList.remove("hidden");
   elements.joinButton.disabled = false;
+  if (state.avatarConfigTimer) window.clearInterval(state.avatarConfigTimer);
+  state.avatarConfigTimer = null;
 }
 
 function createMeterBars(container) {
@@ -1078,6 +1102,53 @@ function setVisualBadge(status, text) {
     badge.classList.add(status);
     badge.lastElementChild.textContent = text;
   }
+}
+
+function setAvatarStatus(avatar) {
+  const providerName = avatar?.provider ? avatar.provider[0].toUpperCase() + avatar.provider.slice(1) : "Avatar";
+  let text = "Avatar: audio-only";
+  let live = false;
+  let warning = false;
+  const status = avatar?.status || "";
+
+  if (avatar?.error) {
+    text = "Avatar: config error";
+    warning = true;
+  } else if (avatar?.enabled && !avatar?.configured) {
+    text = `Avatar: ${providerName} config needed`;
+    warning = true;
+  } else if (status === "starting") {
+    text = `Avatar: ${providerName} starting`;
+  } else if (["ready", "room_joined", "avatar_joined"].includes(status)) {
+    text = `Avatar: ${providerName} joining`;
+  } else if (status === "video_active") {
+    text = `Avatar: ${providerName} live`;
+    live = true;
+  } else if (status === "unavailable" || status === "error") {
+    text = `Avatar: ${providerName} unavailable`;
+    warning = true;
+  } else if (avatar?.enabled && avatar?.configured) {
+    text = `Avatar: ${providerName} configured`;
+  }
+
+  elements.avatarStatus.classList.toggle("warning", warning);
+  elements.avatarStatus.querySelector(".status-dot").classList.toggle("live", live);
+  elements.avatarStatus.querySelector(".status-dot").classList.toggle("warning", warning);
+  elements.avatarStatus.lastElementChild.textContent = text;
+  const envIssueTitle = avatar?.env_issues?.length
+    ? avatar.env_issues.map((issue) => `${issue.name} ${issue.reason}`).join(", ")
+    : "";
+  elements.avatarStatus.title = envIssueTitle || avatar?.last_error || avatar?.message || "";
+
+  elements.callAvatarStatus.classList.toggle("ready", live);
+  elements.callAvatarStatus.classList.toggle("warning", warning);
+  elements.callAvatarStatus.textContent = text;
+  elements.callAvatarStatus.title = elements.avatarStatus.title;
+}
+
+function startAvatarStatusPolling() {
+  if (state.avatarConfigTimer) return;
+  state.avatarConfigTimer = window.setInterval(() => void loadDemoConfig(), 1500);
 }
 
 window.__bayviewVisualState = () => ({

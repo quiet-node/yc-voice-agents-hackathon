@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bayview Pharmacy</title>
-    <link rel="stylesheet" href="./styles.css?v=12" />
+    <link rel="stylesheet" href="./styles.css?v=14" />
   </head>
   <body>
     <main class="prejoin-shell" id="prejoinShell">
@@ -65,6 +65,10 @@
             <span class="status-dot live"></span>
             <span>Ready to join</span>
           </div>
+          <div class="join-status avatar-status" id="avatarStatus">
+            <span class="status-dot"></span>
+            <span>Avatar: checking</span>
+          </div>
           <button class="join-button" id="joinButton" type="button">
             <span>Join now</span>
           </button>
@@ -99,6 +103,7 @@
                 <p>Bayview Agent</p>
               </div>
               <span class="display-name">Bayview Agent</span>
+              <span class="avatar-layer-status" id="callAvatarStatus">Avatar: checking</span>
             </article>
             <article class="video-cell" id="selfViewTile" aria-label="Your video">
               <video id="selfView" class="self-view" autoplay playsinline muted></video>
@@ -186,6 +191,6 @@
         </form>
       </aside>
     </main>
-    <script type="module" src="./app.js?v=12"></script>
+    <script type="module" src="./app.js?v=14"></script>
   </body>
 </html>

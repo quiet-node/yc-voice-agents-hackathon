@@ -11,6 +11,7 @@ bot's existing TTS audio and does not replace the Pipecat STT/LLM/tool pipeline.
 """
 
 import os
+import time
 from typing import Any
 
 import aiohttp
@@ -29,6 +30,15 @@ from pipecat.services.ai_service import AIService
 
 AVATAR_PROVIDER_NONE = "none"
 SUPPORTED_AVATAR_PROVIDERS = {AVATAR_PROVIDER_NONE, "tavus", "simli"}
+
+_AVATAR_RUNTIME_STATE: dict[str, Any] = {
+    "provider": AVATAR_PROVIDER_NONE,
+    "status": "disabled",
+    "message": "Audio-only mode",
+    "last_error": None,
+    "conversation_id": None,
+    "updated_at": None,
+}
 
 
 class AvatarConfigError(RuntimeError):
@@ -67,6 +77,40 @@ def avatar_video_transport_params(provider: str) -> dict[str, Any]:
     }
 
 
+def avatar_runtime_config() -> dict[str, Any]:
+    """Return non-secret avatar status for local/demo UI diagnostics."""
+
+    provider = get_avatar_provider()
+    env_issues = _avatar_env_issues(provider)
+    missing_env = [issue["name"] for issue in env_issues]
+    configured = provider == AVATAR_PROVIDER_NONE or not env_issues
+    runtime = dict(_AVATAR_RUNTIME_STATE)
+
+    status = runtime["status"] if runtime.get("provider") == provider else "configured"
+    message = runtime["message"] if runtime.get("provider") == provider else "Provider configured"
+
+    if provider == AVATAR_PROVIDER_NONE:
+        status = "disabled"
+        message = "Audio-only mode"
+    elif not configured:
+        status = "missing_config"
+        message = "Missing or placeholder avatar credentials"
+
+    return {
+        "provider": provider,
+        "enabled": provider != AVATAR_PROVIDER_NONE,
+        "configured": configured,
+        "missing_env": missing_env,
+        "env_issues": env_issues,
+        "status": status,
+        "message": message,
+        "last_error": runtime.get("last_error") if runtime.get("provider") == provider else None,
+        "conversation_id": runtime.get("conversation_id") if runtime.get("provider") == provider else None,
+        "updated_at": runtime.get("updated_at") if runtime.get("provider") == provider else None,
+        "transport": avatar_video_transport_params(provider) if configured else {},
+    }
+
+
 def create_avatar_service(provider: str, *, session: aiohttp.ClientSession):
     """Create the optional avatar service for the selected provider."""
 
@@ -87,6 +131,11 @@ def _create_tavus_service(*, session: aiohttp.ClientSession):
 
     try:
         from pipecat.services.tavus.video import TavusVideoService
+        from pipecat.transports.tavus.transport import (
+            TavusCallbacks,
+            TavusParams,
+            TavusTransportClient,
+        )
     except ImportError as e:
         raise AvatarConfigError(
             "AVATAR_PROVIDER=tavus requires the pipecat Tavus extra. "
@@ -106,6 +155,91 @@ def _create_tavus_service(*, session: aiohttp.ClientSession):
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self._tavus_warning_logged = False
+            _set_avatar_runtime_state(
+                "tavus",
+                "configured",
+                "Tavus configured; waiting for a WebRTC call",
+            )
+
+        async def setup(self, setup):
+            _set_avatar_runtime_state(
+                "tavus",
+                "starting",
+                "Creating Tavus conversation",
+            )
+            await AIService.setup(self, setup)
+            try:
+                callbacks = TavusCallbacks(
+                    on_joined=self._on_joined,
+                    on_participant_joined=self._on_participant_joined,
+                    on_participant_left=self._on_participant_left,
+                )
+                self._client = TavusTransportClient(
+                    bot_name="Pipecat",
+                    callbacks=callbacks,
+                    api_key=self._api_key,
+                    replica_id=self._replica_id,
+                    persona_id=self._persona_id,
+                    session=self._session,
+                    params=TavusParams(
+                        audio_in_enabled=True,
+                        video_in_enabled=True,
+                        audio_out_enabled=True,
+                        microphone_out_enabled=False,
+                    ),
+                )
+                await self._client.setup(setup)
+            except Exception as e:
+                self._log_tavus_unavailable(e)
+                return
+
+            if self._tavus_client_ready():
+                conversation_id = getattr(getattr(self, "_client", None), "_conversation_id", None)
+                _set_avatar_runtime_state(
+                    "tavus",
+                    "ready",
+                    "Tavus room created; waiting for avatar media",
+                    conversation_id=conversation_id,
+                )
+            else:
+                self._log_tavus_unavailable(
+                    RuntimeError(
+                        "Tavus did not create a Daily client. Check TAVUS_API_KEY and "
+                        "TAVUS_REPLICA_ID, then retry the call."
+                    )
+                )
+
+        async def _on_joined(self, data):
+            conversation_id = getattr(getattr(self, "_client", None), "_conversation_id", None)
+            _set_avatar_runtime_state(
+                "tavus",
+                "room_joined",
+                "Tavus room joined; waiting for replica",
+                conversation_id=conversation_id,
+            )
+            await super()._on_joined(data)
+
+        async def _on_participant_joined(self, participant):
+            conversation_id = getattr(getattr(self, "_client", None), "_conversation_id", None)
+            _set_avatar_runtime_state(
+                "tavus",
+                "avatar_joined",
+                "Tavus replica joined; waiting for video frames",
+                conversation_id=conversation_id,
+            )
+            await super()._on_participant_joined(participant)
+
+        async def _on_participant_video_frame(
+            self, participant_id: str, video_frame: Any, video_source: str
+        ):
+            conversation_id = getattr(getattr(self, "_client", None), "_conversation_id", None)
+            _set_avatar_runtime_state(
+                "tavus",
+                "video_active",
+                "Tavus avatar video is live",
+                conversation_id=conversation_id,
+            )
+            await super()._on_participant_video_frame(participant_id, video_frame, video_source)
 
         async def _on_participant_audio_data(
             self, participant_id: str, audio: Any, audio_source: str
@@ -123,6 +257,11 @@ def _create_tavus_service(*, session: aiohttp.ClientSession):
                 except Exception as e:
                     self._log_tavus_unavailable(e)
             self._client = None
+            _set_avatar_runtime_state(
+                "tavus",
+                "configured",
+                "Tavus configured; waiting for a WebRTC call",
+            )
 
         async def start(self, frame: StartFrame):
             if self._tavus_client_ready():
@@ -180,6 +319,12 @@ def _create_tavus_service(*, session: aiohttp.ClientSession):
             if self._tavus_warning_logged:
                 return
             self._tavus_warning_logged = True
+            _set_avatar_runtime_state(
+                "tavus",
+                "unavailable",
+                "Tavus unavailable; using existing audio-only bot output",
+                error=str(exception) if exception else None,
+            )
             if exception:
                 logger.warning(
                     f"Tavus avatar unavailable; continuing with audio-only output: {exception}"
@@ -210,10 +355,51 @@ def _create_simli_service():
     return SimliVideoService(api_key=api_key, face_id=face_id)
 
 
+def _set_avatar_runtime_state(
+    provider: str,
+    status: str,
+    message: str,
+    *,
+    error: str | None = None,
+    conversation_id: str | None = None,
+) -> None:
+    _AVATAR_RUNTIME_STATE.update(
+        {
+            "provider": provider,
+            "status": status,
+            "message": message,
+            "last_error": error,
+            "conversation_id": conversation_id,
+            "updated_at": time.time(),
+        }
+    )
+
+
+def _avatar_env_issues(provider: str) -> list[dict[str, str]]:
+    required_env: list[str] = []
+    if provider == "tavus":
+        required_env = ["TAVUS_API_KEY", "TAVUS_REPLICA_ID"]
+    elif provider == "simli":
+        required_env = ["SIMLI_API_KEY", "SIMLI_FACE_ID"]
+
+    issues: list[dict[str, str]] = []
+    for name in required_env:
+        value = os.getenv(name, "").strip()
+        if not value:
+            issues.append({"name": name, "reason": "missing"})
+        elif _is_placeholder_env_value(value):
+            issues.append({"name": name, "reason": "placeholder"})
+    return issues
+
+
 def _required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise AvatarConfigError(f"{name} is required when AVATAR_PROVIDER is enabled.")
+    if _is_placeholder_env_value(value):
+        raise AvatarConfigError(
+            f"{name} still has a placeholder value; replace it with a real provider value."
+        )
     return value
 
 
@@ -228,3 +414,26 @@ def _int_env(name: str, default: int) -> int:
     if parsed <= 0:
         raise AvatarConfigError(f"{name} must be positive, got {parsed}.")
     return parsed
+
+
+def _is_placeholder_env_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    placeholder_values = {
+        "<api-key>",
+        "<tavus_api_key>",
+        "<your_tavus_api_key>",
+        "<your_replica_id>",
+        "api-key",
+        "change_me",
+        "changeme",
+        "replace_me",
+        "todo",
+        "your_api_key",
+        "your_replica_id",
+        "your_tavus_api_key",
+    }
+    return (
+        normalized in placeholder_values
+        or normalized.startswith("your_")
+        or normalized.startswith("<your_")
+    )
