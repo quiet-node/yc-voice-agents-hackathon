@@ -8,7 +8,7 @@ A real-time voice AI agent built on **Pipecat**, forked from the official YC Voi
 
 The starter ships a flower-shop ordering bot ("Field & Flower"). We're repurposing it into our own agent.
 
-> **What we're building:** _(update this line as the product firms up)_ a voice agent we evaluate and continuously improve with **Cekura** — the point of the event is a production-grade agent with a real eval loop, not a one-off demo.
+> **What we're building:** Bayview Pharmacy, a secure prescription-refill voice agent we evaluate and continuously improve with **Cekura** — the point of the event is a production-grade agent with a real eval loop, not a one-off demo.
 
 All application code lives in **`server/`**. It's Python.
 
@@ -70,7 +70,7 @@ NVIDIA endpoints are provided by the event and can change — get current values
 - **Set `ENV=local`** in `.env` for local runs. Without it the bot imports the Krisp noise filter (Pipecat Cloud-only, not installed locally) and **crashes the moment you click Connect**.
 - **Restart the bot after editing `.env`** — env is loaded once at startup.
 - **Keep `NEMOTRON_ENABLE_THINKING=false`** for voice. Reasoning tokens add seconds and can be spoken aloud if the server lacks a reasoning parser.
-- **Sample rates:** WebRTC is 16 kHz in / 24 kHz out; Twilio is 8 kHz both ways (handled in the Twilio branch). Don't hardcode `audio_in_sample_rate=8000` on the WebRTC path — it breaks turn detection.
+- **Sample rates:** WebRTC is 16 kHz in / 24 kHz out. Twilio media arrives as 8 kHz mu-law, but the Twilio branch should resample inbound audio to 16 kHz for NVIDIA STT and keep outbound audio at 8 kHz for phone playback.
 - **One bot per port (7860).** Kill the old instance before restarting, or you'll get "address already in use."
 
 ## Where the product lives (how to customize)

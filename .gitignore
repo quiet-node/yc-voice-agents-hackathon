@@ -218,6 +218,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Generated self-improvement dashboards
+harness/runs/
+
 # Node.js (client/)
 
 # Local reference checkout of pipecat source (read-only; runtime uses the
