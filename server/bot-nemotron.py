@@ -60,6 +60,7 @@ from pipecat.turns.user_turn_completion_mixin import UserTurnCompletionConfig
 from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
+from language_router import LanguagePreferenceProcessor
 from mock_backend import PATIENTS
 from nemotron_llm import VLLMOpenAILLMService
 from stt_provider import create_stt_service, get_stt_provider
@@ -340,6 +341,16 @@ async def run_bot(
         "3. Then ask what they'd like to do (refill, status check, etc.).\n"
         "Never skip straight to 'which medication would you like to refill?' without "
         "reading the list first.\n\n"
+        "LANGUAGE HANDLING:\n"
+        "- The first thing you ask is the English/Spanish preference prompt. If the "
+        "caller says 'one', '1', 'English', or 'ingles', continue in English. If "
+        "the caller says 'two', '2', 'dos', 'Spanish', 'espanol', or uses Spanish "
+        "words such as 'hola', continue in Spanish immediately.\n"
+        "- A spoken Spanish cue is enough to select Spanish. Do not ask the language "
+        "question again after a language is selected.\n"
+        "- If Spanish is selected, every spoken response must be in Spanish unless "
+        "the caller asks to switch languages. Keep the same security, verification, "
+        "and tool-use rules.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
         "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"
@@ -410,6 +421,7 @@ async def run_bot(
         llm.register_direct_function(fn)
 
     context = LLMContext(tools=tools)
+    language_preference = LanguagePreferenceProcessor(context)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -447,6 +459,7 @@ async def run_bot(
     pipeline_steps = [
         transport.input(),
         stt,
+        language_preference,
         user_aggregator,
         llm,
         tts,
@@ -506,11 +519,14 @@ async def run_bot(
         start_time = _call_info.get("start") or end_time
         duration_s = int((end_time - start_time).total_seconds())
 
-        turns = [
-            {"role": m["role"], "content": m.get("content") or ""}
-            for m in context.messages
-            if m.get("role") in ("user", "assistant") and m.get("content")
-        ]
+        turns = []
+        for message in context.messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            content = message.get("content")
+            if role in ("user", "assistant") and isinstance(content, str) and content:
+                turns.append({"role": role, "content": content})
 
         if turns:
             ts = end_time.strftime("%Y%m%dT%H%M%S")

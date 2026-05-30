@@ -54,6 +54,7 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPI
 from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
 from pipecat.workers.runner import WorkerRunner
 
+from language_router import LanguagePreferenceProcessor
 from mock_backend import PATIENTS
 from stt_provider import create_stt_service, get_stt_provider
 from video_avatar import (
@@ -282,6 +283,16 @@ async def run_bot(
         "Once verified, use get_prescriptions to read their medications, refills "
         "remaining, and pickup status, and refill_prescription to refill one. "
         "Confirm which medication before refilling.\n\n"
+        "LANGUAGE HANDLING:\n"
+        "- The first thing you ask is the English/Spanish preference prompt. If the "
+        "caller says 'one', '1', 'English', or 'ingles', continue in English. If "
+        "the caller says 'two', '2', 'dos', 'Spanish', 'espanol', or uses Spanish "
+        "words such as 'hola', continue in Spanish immediately.\n"
+        "- A spoken Spanish cue is enough to select Spanish. Do not ask the language "
+        "question again after a language is selected.\n"
+        "- If Spanish is selected, every spoken response must be in Spanish unless "
+        "the caller asks to switch languages. Keep the same security, verification, "
+        "and tool-use rules.\n\n"
         "Talk like a real pharmacy clerk on the phone — not a chatbot:\n"
         "- Keep it to 1–2 short sentences per turn.\n"
         "- Ask ONE thing at a time. Get the name, wait, then the date of birth.\n"
@@ -324,6 +335,7 @@ async def run_bot(
         llm.register_direct_function(fn)
 
     context = LLMContext(tools=tools)
+    language_preference = LanguagePreferenceProcessor(context)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -351,6 +363,7 @@ async def run_bot(
     pipeline_steps = [
         transport.input(),
         stt,
+        language_preference,
         user_aggregator,
         llm,
         tts,
