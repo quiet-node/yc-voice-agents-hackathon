@@ -1,0 +1,55 @@
+name: Deploy to Pipecat Cloud
+
+# Build + deploy the Bayview Pharmacy bot to Pipecat Cloud whenever bot code,
+# the Dockerfile, deploy config, or dependencies land on main. The image is
+# built server-side by Pipecat Cloud (cloud build), so the runner only needs the
+# `pc` CLI and network access. Runtime secrets live in the `bayview-pharmacy-secrets`
+# secret set on Pipecat Cloud (uploaded separately, not by this workflow).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/*.py"
+      - "server/Dockerfile"
+      - "server/pcc-deploy.toml"
+      - "server/pyproject.toml"
+      - "server/uv.lock"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+# Never let two deploys run at once; queue a newer one behind an in-flight deploy
+# rather than cancelling (a cancelled deploy can leave a half-rolled-out agent).
+concurrency:
+  group: deploy-pipecat-cloud
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Pipecat CLI
+        run: |
+          uv tool install pipecat-ai-cli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Authenticate to Pipecat Cloud
+        env:
+          PIPECAT_PAT: ${{ secrets.PIPECAT_PAT }}
+        run: pc cloud auth use-pat "$PIPECAT_PAT"
+
+      - name: Deploy
+        run: |
+          pc cloud deploy -y \
+            --organization tuilux \
+            --config-file server/pcc-deploy.toml \
+            --build-dir server \
+            --dockerfile Dockerfile
