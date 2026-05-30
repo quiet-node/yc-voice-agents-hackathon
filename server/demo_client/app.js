@@ -1115,7 +1115,7 @@ function setAvatarStatus(avatar) {
     text = "Avatar: config error";
     warning = true;
   } else if (avatar?.enabled && !avatar?.configured) {
-    text = `Avatar: ${providerName} config needed`;
+    text = `Avatar: ${providerName} setup needed`;
     warning = true;
   } else if (status === "starting") {
     text = `Avatar: ${providerName} starting`;

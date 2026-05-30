@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bayview Pharmacy</title>
-    <link rel="stylesheet" href="./styles.css?v=14" />
+    <link rel="stylesheet" href="./styles.css?v=15" />
   </head>
   <body>
     <main class="prejoin-shell" id="prejoinShell">
@@ -99,8 +99,25 @@
             <article class="video-cell" aria-label="Bayview Agent video">
               <video id="agentVideo" class="agent-video" autoplay playsinline></video>
               <div class="stage-empty" id="stageEmpty">
-                <div class="avatar-mark">B</div>
-                <p>Bayview Agent</p>
+                <div class="agent-portrait" aria-hidden="true">
+                  <div class="agent-head">
+                    <span class="agent-hair"></span>
+                    <span class="agent-ear left"></span>
+                    <span class="agent-ear right"></span>
+                    <span class="agent-eye left"></span>
+                    <span class="agent-eye right"></span>
+                    <span class="agent-mouth"></span>
+                  </div>
+                  <div class="agent-neck"></div>
+                  <div class="agent-coat">
+                    <span class="agent-shirt"></span>
+                    <span class="agent-badge"></span>
+                  </div>
+                </div>
+                <div class="stage-empty-copy">
+                  <p>Bayview Agent</p>
+                  <span>Video avatar standby</span>
+                </div>
               </div>
               <span class="display-name">Bayview Agent</span>
               <span class="avatar-layer-status" id="callAvatarStatus">Avatar: checking</span>
@@ -191,6 +208,6 @@
         </form>
       </aside>
     </main>
-    <script type="module" src="./app.js?v=14"></script>
+    <script type="module" src="./app.js?v=15"></script>
   </body>
 </html>
