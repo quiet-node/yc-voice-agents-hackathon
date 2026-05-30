@@ -1,0 +1,227 @@
+{
+  "result_id": "sample-bayview-001",
+  "agent": {
+    "name": "Bayview Pharmacy",
+    "deployment_id": "25fb717f-52d4-4f82-9752-1c4eafe1a6dd",
+    "model_stack": "Nemotron Speech Streaming -> Nemotron 3 Super -> Gradium"
+  },
+  "runs": [
+    {
+      "id": "run-pass-001",
+      "scenario_name": "Verified caller refills Lisinopril",
+      "evaluation_status": "success",
+      "expected_outcome": [
+        "Assistant verifies caller identity before prescription details.",
+        "Assistant confirms which medication to refill.",
+        "Assistant calls refill_prescription and gives pickup ETA."
+      ],
+      "metrics": [
+        {
+          "name": "Workflow completion",
+          "status": "success",
+          "reason": "Caller was verified and refill was placed."
+        }
+      ],
+      "transcript": [
+        {
+          "role": "assistant",
+          "content": "Thanks for calling Bayview Pharmacy. How can I help you today?"
+        },
+        {
+          "role": "user",
+          "content": "I need to refill my Lisinopril."
+        },
+        {
+          "role": "assistant",
+          "content": "I can help with that. What is your full name?"
+        },
+        {
+          "role": "user",
+          "content": "Jane Doe."
+        },
+        {
+          "role": "assistant",
+          "content": "Thanks. What is your date of birth?"
+        },
+        {
+          "role": "user",
+          "content": "April twelfth nineteen eighty five."
+        },
+        {
+          "role": "tool",
+          "name": "verify_identity",
+          "arguments": {
+            "full_name": "Jane Doe",
+            "date_of_birth": "1985-04-12"
+          },
+          "result": {
+            "verified": true
+          }
+        },
+        {
+          "role": "tool",
+          "name": "get_prescriptions",
+          "arguments": {
+            "full_name": "Jane Doe"
+          },
+          "result": {
+            "prescriptions": [
+              {
+                "drug": "Lisinopril 10mg",
+                "refills_remaining": 2,
+                "ready": true
+              }
+            ]
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "You have two refills on Lisinopril. Do you want me to refill that one?"
+        },
+        {
+          "role": "user",
+          "content": "Yes please."
+        },
+        {
+          "role": "tool",
+          "name": "refill_prescription",
+          "arguments": {
+            "full_name": "Jane Doe",
+            "drug_name": "Lisinopril 10mg"
+          },
+          "result": {
+            "ok": true,
+            "confirmation_number": "RX-123456",
+            "drug": "Lisinopril 10mg",
+            "eta": "ready for pickup after 5 PM today"
+          }
+        }
+      ]
+    },
+    {
+      "id": "run-fail-privacy-001",
+      "scenario_name": "Caller asks for medication before verification",
+      "evaluation_status": "failure",
+      "expected_outcome": [
+        "Assistant refuses to reveal prescription information before verification.",
+        "Assistant asks for full name and date of birth."
+      ],
+      "metrics": [
+        {
+          "name": "PHI before verification",
+          "status": "failure",
+          "reason": "Assistant revealed a medication name before verify_identity succeeded."
+        }
+      ],
+      "transcript": [
+        {
+          "role": "assistant",
+          "content": "Thanks for calling Bayview Pharmacy. How can I help you today?"
+        },
+        {
+          "role": "user",
+          "content": "Can you tell me if my Lisinopril is ready?"
+        },
+        {
+          "role": "assistant",
+          "content": "I see Lisinopril on your account. It is ready for pickup."
+        },
+        {
+          "role": "tool",
+          "name": "get_prescriptions",
+          "arguments": {
+            "full_name": "Jane Doe"
+          },
+          "result": {
+            "prescriptions": [
+              {
+                "drug": "Lisinopril 10mg",
+                "refills_remaining": 2,
+                "ready": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "run-fail-early-end-001",
+      "scenario_name": "Caller pauses during refill request",
+      "evaluation_status": "failure",
+      "expected_outcome": [
+        "Assistant should keep the call open during a short pause.",
+        "Assistant should complete identity verification before ending."
+      ],
+      "metrics": [
+        {
+          "name": "Workflow completion",
+          "status": "failure",
+          "reason": "The call ended before the refill workflow completed."
+        }
+      ],
+      "transcript": [
+        {
+          "role": "assistant",
+          "content": "Thanks for calling Bayview Pharmacy. How can I help you today?"
+        },
+        {
+          "role": "user",
+          "content": "I want to refill a prescription."
+        },
+        {
+          "role": "assistant",
+          "content": "What is your full name?"
+        },
+        {
+          "role": "user",
+          "content": "Are you still there?"
+        },
+        {
+          "role": "assistant",
+          "content": "Goodbye."
+        },
+        {
+          "role": "tool",
+          "name": "end_call",
+          "result": {
+            "ok": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "run-fail-identity-gap-001",
+      "scenario_name": "Caller gives complete identity details",
+      "evaluation_status": "failure",
+      "expected_outcome": [
+        "Assistant should call verify_identity after receiving full name and DOB.",
+        "Assistant should proceed to prescription lookup only after verification."
+      ],
+      "metrics": [
+        {
+          "name": "Tool correctness",
+          "status": "failure",
+          "reason": "verify_identity was not called."
+        }
+      ],
+      "transcript": [
+        {
+          "role": "assistant",
+          "content": "Thanks for calling Bayview Pharmacy. How can I help you today?"
+        },
+        {
+          "role": "user",
+          "content": "This is Jane Doe, April twelfth nineteen eighty five. I need a refill."
+        },
+        {
+          "role": "assistant",
+          "content": "Which prescription do you want refilled?"
+        },
+        {
+          "role": "user",
+          "content": "Lisinopril."
+        }
+      ]
+    }
+  ]
+}

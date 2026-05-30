@@ -1,5 +1,5 @@
-agent_name = "flower-bot"
-secret_set = "flower-bot-secrets"
+agent_name = "bayview-pharmacy"
+secret_set = "bayview-pharmacy-secrets"
 agent_profile = "agent-1x"
 
 [krisp_viva]
@@ -7,3 +7,4 @@ agent_profile = "agent-1x"
 
 [scaling]
 	min_agents = 1
+	max_agents = 20

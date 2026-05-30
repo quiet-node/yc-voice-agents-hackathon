@@ -294,7 +294,7 @@ async def run_bot(
     # 16-bit PCM, 16 kHz, mono — matching the WebRTC input path. The URL can be
     # overridden via NVIDIA_ASR_URL.
     stt = NVidiaWebSocketSTTService(
-        url=os.getenv("NVIDIA_ASR_URL", "ws://192.168.7.228:8081"),
+        url=os.getenv("NVIDIA_ASR_URL", "ws://44.241.251.184:8080"),
         strip_interim_prefix=True,
     )
 
@@ -322,7 +322,10 @@ async def run_bot(
     enable_thinking = os.getenv("NEMOTRON_ENABLE_THINKING", "false").lower() == "true"
     llm = VLLMOpenAILLMService(
         api_key=os.getenv("NEMOTRON_LLM_API_KEY", "EMPTY"),  # vLLM ignores unless --api-key set
-        base_url=os.getenv("NEMOTRON_LLM_URL", "http://192.168.7.228:8000/v1"),
+        base_url=os.getenv(
+            "NEMOTRON_LLM_URL",
+            "http://nemotron-fleet-alb-1322439314.us-west-2.elb.amazonaws.com/v1",
+        ),
         settings=VLLMOpenAILLMService.Settings(
             model=os.getenv("NEMOTRON_LLM_MODEL", "nvidia/nemotron-3-super"),
             system_instruction=system_instruction,
@@ -425,9 +428,10 @@ async def bot(runner_args: RunnerArguments):
                 ),
             )
         case WebSocketRunnerArguments():
-            # Twilio media streams are 8 kHz μ-law in both directions.
-            # This overrides the default sample rates: 16 kHz in / 24 kHz out.
-            transport_overrides["audio_in_sample_rate"] = 8000
+            # Twilio media streams are 8 kHz μ-law. Decode/resample inbound
+            # audio to 16 kHz PCM because the NVIDIA ASR server requires it;
+            # keep outbound at 8 kHz so the Twilio serializer sends phone audio.
+            transport_overrides["audio_in_sample_rate"] = 16000
             transport_overrides["audio_out_sample_rate"] = 8000
 
             # Parse Twilio websocket and fetch call information

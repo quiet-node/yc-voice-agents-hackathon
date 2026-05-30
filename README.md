@@ -34,7 +34,7 @@ Judging will start at 6:00. In general, the judges want to showcase interesting 
 
 This repo contains two versions of a voice agent built with [Pipecat](https://pipecat.ai).
 
-The demo bot **Field & Flower** is a neighborhood flower shop: callers order a bouquet for delivery while the bot looks up the catalog, captures delivery details, and places the order. All backend calls are mocked, so the starter runs with nothing but AI service keys.
+The demo bot **Bayview Pharmacy** is a secure prescription-refill phone agent: callers verify their identity before the bot reveals prescription details, checks refill status, or places a refill. All backend calls are mocked, so the starter runs with nothing but AI service keys.
 
 ## Version 1 — GPT-4.1
 
@@ -141,7 +141,7 @@ Once the bot works locally, deploy to Pipecat Cloud and connect it to a Twilio p
      <Connect>
        <Stream url="wss://api.pipecat.daily.co/ws/twilio">
          <Parameter name="_pipecatCloudServiceHost"
-           value="flower-bot.YOUR_ORG_NAME"/>
+           value="bayview-pharmacy.YOUR_ORG_NAME"/>
        </Stream>
      </Connect>
    </Response>
@@ -161,7 +161,7 @@ Your deployment details are specified in the `pcc-deploy.toml` file. You can lea
 ### Upload secrets
 
 ```bash
-pc cloud secrets set flower-bot-secrets --file .env
+pc cloud secrets set bayview-pharmacy-secrets --file .env
 ```
 
 This uploads everything from `.env` to Pipecat Cloud's secure storage. The bot reads from there at runtime, so you don't bake keys into the image.
@@ -178,7 +178,7 @@ Learn more about [cloud builds](https://docs.pipecat.ai/pipecat-cloud/guides/clo
 
 ### Call your bot
 
-Dial the Twilio number you set up. 🌷
+Dial the Twilio number you set up.
 
 ## Test your agent with Cekura
 
@@ -214,6 +214,21 @@ Repo: [github.com/cekura-ai/cekura-skills](https://github.com/cekura-ai/cekura-s
 This spins up anything from 10–20 evaluators (what Cekura calls test cases), runs scenarios against your Pipecat agent, and gives you back a full report — transcripts, scores, and what failed — so you can iterate fast.
 
 > When connecting your agent, **select `Pipecat` as the provider.** Details: [docs.cekura.ai → Pipecat](https://docs.cekura.ai/documentation/integrations/pipecat/automated).
+
+### Visualize agent improvement
+
+This repo includes a local, dependency-free self-improvement harness that turns
+Cekura-style report JSON into a dashboard and fix plan:
+
+```bash
+python3 harness/generate_dashboard.py \
+  --input harness/examples/bayview_cekura_report_sample.json \
+  --out harness/runs/demo
+```
+
+Open `harness/runs/demo/index.html` in your browser. The harness extracts
+Bayview-specific facts, clusters failures, ranks fixes, and writes a
+machine-readable `report.json` plus a human-readable `fix_plan.md`.
 
 ## Learn more
 
