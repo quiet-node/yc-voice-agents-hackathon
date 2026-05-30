@@ -947,14 +947,49 @@ def serialize_run(record: RunRecord) -> dict[str, Any]:
     return data
 
 
-def write_report(model: dict[str, Any], out_dir: Path) -> None:
+def write_report(model: dict[str, Any], out_dir: Path, *, write_html: bool = True) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.json").write_text(
         json.dumps(model, indent=2, ensure_ascii=True, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     (out_dir / "fix_plan.md").write_text(render_fix_plan(model), encoding="utf-8")
-    (out_dir / "index.html").write_text(render_html(model), encoding="utf-8")
+    if write_html:
+        (out_dir / "index.html").write_text(render_html(model), encoding="utf-8")
+
+
+def build_dashboard_model(
+    *,
+    input_path: Path = DEFAULT_INPUT,
+    title: str = "Bayview Pharmacy Self-Improvement Harness",
+    cekura_result_id: str | None = None,
+    cekura_agent_id: int = 18021,
+) -> dict[str, Any]:
+    if cekura_result_id:
+        payload, source_path = load_cekura_result(cekura_result_id, cekura_agent_id)
+    else:
+        source_path = input_path.resolve()
+        payload = load_input(source_path)
+    return build_model(payload, source_path, title)
+
+
+def generate_dashboard(
+    *,
+    input_path: Path = DEFAULT_INPUT,
+    out_dir: Path = DEFAULT_OUT,
+    title: str = "Bayview Pharmacy Self-Improvement Harness",
+    cekura_result_id: str | None = None,
+    cekura_agent_id: int = 18021,
+    write_html: bool = True,
+) -> dict[str, Any]:
+    model = build_dashboard_model(
+        input_path=input_path,
+        title=title,
+        cekura_result_id=cekura_result_id,
+        cekura_agent_id=cekura_agent_id,
+    )
+    write_report(model, out_dir.resolve(), write_html=write_html)
+    return model
 
 
 def render_fix_plan(model: dict[str, Any]) -> str:
@@ -1108,6 +1143,37 @@ HTML_TEMPLATE = r"""<!doctype html>
     .segmented button.active {
       background: var(--teal);
       color: #fff;
+    }
+    .refresh-button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      min-height: 36px;
+      padding: 8px 11px;
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .refresh-button:hover:not(:disabled) {
+      border-color: var(--teal);
+      color: var(--teal);
+    }
+    .refresh-button:disabled {
+      cursor: not-allowed;
+      color: var(--muted);
+      background: #f5f7f4;
+    }
+    .refresh-status {
+      color: var(--muted);
+      font-size: 12px;
+      max-width: 220px;
+      overflow-wrap: anywhere;
+    }
+    .refresh-status.error {
+      color: var(--red);
+    }
+    .refresh-status.success {
+      color: var(--green);
     }
     main {
       max-width: 1440px;
@@ -1333,6 +1399,52 @@ HTML_TEMPLATE = r"""<!doctype html>
       h1 { font-size: 19px; }
       .kpi-value { font-size: 23px; }
     }
+    /* ── Heal Toast ─────────────────────────────────────────────────────── */
+    .heal-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 100;
+      background: var(--panel);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 12px 16px;
+      min-width: 240px;
+      max-width: 360px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      line-height: 1.35;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      border: 1.5px solid transparent;
+    }
+    .heal-toast.hidden { opacity: 0; transform: translateY(10px); pointer-events: none; }
+    .heal-toast.working { border-color: #fde68a; background: #fffbeb; color: var(--amber); }
+    .heal-toast.passed  { border-color: #86efac; background: #f0fdf4; color: var(--green); }
+    .heal-toast.failed  { border-color: #fca5a5; background: #fff1f0; color: var(--red);   }
+    .heal-pulse {
+      flex-shrink: 0;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: healPulse 1.4s ease-in-out infinite;
+    }
+    @keyframes healPulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.3; transform: scale(0.6); }
+    }
+    .heal-queue-pill {
+      margin-left: auto;
+      flex-shrink: 0;
+      border-radius: 10px;
+      padding: 1px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      background: rgba(0, 0, 0, 0.12);
+    }
   </style>
 </head>
 <body>
@@ -1344,7 +1456,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <div class="subhead">
           <span id="agent-name"></span>
           <span id="result-id"></span>
-          <span>Generated __GENERATED_AT__</span>
+          <span id="generated-at">Generated __GENERATED_AT__</span>
         </div>
       </div>
       <div class="toolbar">
@@ -1353,6 +1465,8 @@ HTML_TEMPLATE = r"""<!doctype html>
           <button data-view="matrix">Matrix</button>
           <button data-view="runs">Runs</button>
         </div>
+        <button id="refresh-button" class="refresh-button" type="button">Refresh</button>
+        <span id="refresh-status" class="refresh-status" aria-live="polite"></span>
       </div>
     </div>
   </header>
@@ -1382,15 +1496,76 @@ HTML_TEMPLATE = r"""<!doctype html>
     </section>
   </main>
 </div>
+<div id="heal-toast" class="heal-toast hidden" role="status" aria-live="polite">
+  <span id="heal-dot" class="heal-pulse" style="display:none"></span>
+  <span id="heal-msg" style="flex:1;min-width:0"></span>
+  <span id="heal-queue-pill" class="heal-queue-pill" style="display:none"></span>
+</div>
 <script id="dashboard-data" type="application/json">__DASHBOARD_JSON__</script>
 <script>
-const model = JSON.parse(document.getElementById("dashboard-data").textContent);
+let model = JSON.parse(document.getElementById("dashboard-data").textContent);
 let selectedClusterId = model.clusters[0]?.id || null;
+const apiAvailable = ["http:", "https:"].includes(window.location.protocol);
+const refreshTokenStorageKey = "bayviewDashboardRefreshToken";
 
 const severityClass = (value) => ["critical", "high", "medium", "low"].includes(value) ? value : "low";
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[char]));
+
+function readRefreshToken() {
+  const params = new URLSearchParams(window.location.search);
+  const queryToken = params.get("refresh_token") || params.get("dashboard_token");
+  if (queryToken) {
+    try {
+      window.localStorage.setItem(refreshTokenStorageKey, queryToken);
+    } catch (_) {}
+    params.delete("refresh_token");
+    params.delete("dashboard_token");
+    const cleanQuery = params.toString();
+    const cleanUrl = `${window.location.pathname}${cleanQuery ? `?${cleanQuery}` : ""}${window.location.hash}`;
+    window.history.replaceState({}, "", cleanUrl);
+    return queryToken;
+  }
+  try {
+    return window.localStorage.getItem(refreshTokenStorageKey) || "";
+  } catch (_) {
+    return "";
+  }
+}
+
+const refreshToken = readRefreshToken();
+
+function setRefreshStatus(message, className = "") {
+  const status = document.getElementById("refresh-status");
+  status.textContent = message;
+  status.className = `refresh-status ${className}`.trim();
+}
+
+function renderHeader() {
+  document.getElementById("agent-name").textContent = model.agent.name || "Bayview Pharmacy";
+  document.getElementById("result-id").textContent = model.agent.result_id ? `Result ${model.agent.result_id}` : "";
+  document.getElementById("generated-at").textContent = model.generated_at ? `Generated ${model.generated_at}` : "";
+}
+
+function renderAll() {
+  renderHeader();
+  renderKpis();
+  renderClusters();
+  renderClusterDetail(model.clusters.find((cluster) => cluster.id === selectedClusterId));
+  renderFixQueue();
+  renderMatrix();
+  renderRuns();
+}
+
+function replaceModel(nextModel) {
+  const previousClusterId = selectedClusterId;
+  model = nextModel;
+  selectedClusterId = model.clusters.find((cluster) => cluster.id === previousClusterId)?.id
+    || model.clusters[0]?.id
+    || null;
+  renderAll();
+}
 
 function renderKpis() {
   const s = model.summary;
@@ -1559,16 +1734,155 @@ function setupViews() {
   });
 }
 
+async function loadServedReport() {
+  if (!apiAvailable) {
+    return;
+  }
+  try {
+    const response = await fetch(`report.json?cache=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) {
+      return;
+    }
+    const nextModel = await response.json();
+    if (nextModel && nextModel.generated_at && nextModel.generated_at !== model.generated_at) {
+      replaceModel(nextModel);
+      setRefreshStatus(`Loaded ${nextModel.generated_at}`, "success");
+    }
+  } catch (_) {}
+}
+
+async function refreshDashboard() {
+  const button = document.getElementById("refresh-button");
+  button.disabled = true;
+  setRefreshStatus("Refreshing Cekura...", "");
+  try {
+    const response = await fetch("api/refresh", {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "X-Dashboard-Refresh-Token": refreshToken
+      }
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.ok) {
+      throw new Error(payload.error || `Refresh failed with HTTP ${response.status}`);
+    }
+    replaceModel(payload.model);
+    setRefreshStatus(`Updated ${payload.model.generated_at}`, "success");
+  } catch (error) {
+    setRefreshStatus(error.message || "Refresh failed", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setupRefresh() {
+  const button = document.getElementById("refresh-button");
+  if (!apiAvailable) {
+    button.disabled = true;
+    setRefreshStatus("Static snapshot", "");
+    return;
+  }
+  if (!refreshToken) {
+    button.disabled = true;
+    setRefreshStatus("Refresh token required", "error");
+    return;
+  }
+  button.addEventListener("click", refreshDashboard);
+  setRefreshStatus("Ready", "");
+}
+
+// ── Heal Status Toast ────────────────────────────────────────────────────
+let _healToastTimer = null;
+
+async function pollHealStatus() {
+  if (!apiAvailable) return;
+  try {
+    const res = await fetch("/api/heal-status", { cache: "no-store" });
+    if (!res.ok) return;
+    const payload = await res.json().catch(() => null);
+    if (payload && payload.ok) renderHealToast(payload.status);
+  } catch (_) {}
+}
+
+function renderHealToast(status) {
+  const toast = document.getElementById("heal-toast");
+  const dot   = document.getElementById("heal-dot");
+  const msg   = document.getElementById("heal-msg");
+  const pill  = document.getElementById("heal-queue-pill");
+  if (!toast) return;
+
+  if (!status) { toast.className = "heal-toast hidden"; return; }
+
+  const { queue_depth = 0, in_progress, last_result } = status;
+
+  if (last_result && !in_progress && queue_depth === 0) {
+    const age = Date.now() - new Date(last_result.completed_at).getTime();
+    if (age < 12000) {
+      clearTimeout(_healToastTimer);
+      toast.className = `heal-toast ${last_result.passed ? "passed" : "failed"}`;
+      dot.style.display = "none";
+      pill.style.display = "none";
+      msg.textContent = "";
+      const icon = document.createTextNode(last_result.passed ? "✅  Fixed: " : "❌  No improvement: ");
+      msg.appendChild(icon);
+      msg.appendChild(document.createTextNode(`scenario ${last_result.scenario_id}`));
+      if (last_result.pr_url) {
+        msg.appendChild(document.createTextNode(" — "));
+        const a = document.createElement("a");
+        a.href = last_result.pr_url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = "view PR";
+        a.style.cssText = "color:inherit;text-decoration:underline;font-weight:600";
+        msg.appendChild(a);
+      }
+      _healToastTimer = setTimeout(() => { toast.className = "heal-toast hidden"; }, 10000);
+      return;
+    }
+  }
+
+  clearTimeout(_healToastTimer);
+  _healToastTimer = null;
+
+  if (in_progress) {
+    toast.className = "heal-toast working";
+    dot.style.display = "block";
+    const elapsed = Math.round((Date.now() - new Date(in_progress.started_at).getTime()) / 1000);
+    const timeStr = elapsed > 4 ? ` (${elapsed}s)` : "";
+    msg.textContent = `Healing scenario ${in_progress.scenario_id}${timeStr}`;
+    if (queue_depth > 1) {
+      pill.textContent = `+${queue_depth - 1} more`;
+      pill.style.display = "inline-block";
+    } else {
+      pill.style.display = "none";
+    }
+    return;
+  }
+
+  if (queue_depth > 0) {
+    toast.className = "heal-toast working";
+    dot.style.display = "block";
+    msg.textContent = `${queue_depth} scenario${queue_depth !== 1 ? "s" : ""} queued for healing…`;
+    pill.style.display = "none";
+    return;
+  }
+
+  toast.className = "heal-toast hidden";
+}
+
+function setupHealPolling() {
+  if (!apiAvailable) return;
+  pollHealStatus();
+  setInterval(pollHealStatus, 3000);
+}
+
 function init() {
-  document.getElementById("agent-name").textContent = model.agent.name || "Bayview Pharmacy";
-  document.getElementById("result-id").textContent = model.agent.result_id ? `Result ${model.agent.result_id}` : "";
-  renderKpis();
-  renderClusters();
-  renderClusterDetail(model.clusters.find((cluster) => cluster.id === selectedClusterId));
-  renderFixQueue();
-  renderMatrix();
-  renderRuns();
+  renderAll();
   setupViews();
+  setupRefresh();
+  loadServedReport();
+  setupHealPolling();
 }
 
 init();
@@ -1599,13 +1913,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     out_dir = args.out.resolve()
-    if args.cekura_result_id:
-        payload, source_path = load_cekura_result(args.cekura_result_id, args.cekura_agent_id)
-    else:
-        source_path = args.input.resolve()
-        payload = load_input(source_path)
-    model = build_model(payload, source_path, args.title)
-    write_report(model, out_dir)
+    generate_dashboard(
+        input_path=args.input,
+        out_dir=out_dir,
+        title=args.title,
+        cekura_result_id=args.cekura_result_id,
+        cekura_agent_id=args.cekura_agent_id,
+    )
     print(f"Wrote dashboard: {out_dir / 'index.html'}")
     print(f"Wrote normalized report: {out_dir / 'report.json'}")
     print(f"Wrote fix plan: {out_dir / 'fix_plan.md'}")

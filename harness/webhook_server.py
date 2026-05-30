@@ -29,6 +29,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "server"
 sys.path.insert(0, str(Path(__file__).parent))
 
+_STATUS_FILE = ROOT / "harness" / "runs" / "webhook-status.json"
+
 from self_heal import HealResult, run_heal  # noqa: E402
 
 logging.basicConfig(
@@ -45,6 +47,10 @@ log = logging.getLogger("webhook")
 _queue: asyncio.Queue[int] = asyncio.Queue()
 _queued: set[int] = set()       # IDs currently queued OR in-progress
 _lock: asyncio.Lock = asyncio.Lock()
+_heal_state: dict[str, Any] = {
+    "in_progress": None,
+    "last_result": None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +69,25 @@ def _webhook_secret() -> str:
     if not secret:
         raise RuntimeError("CEKURA_WEBHOOK_SECRET not found in environment or server/.env")
     return secret
+
+
+# ---------------------------------------------------------------------------
+# Status file
+# ---------------------------------------------------------------------------
+
+def _write_status() -> None:
+    """Persist current heal state to disk so the dashboard can read it."""
+    status = {
+        "updated_at": datetime.now(UTC).isoformat(),
+        "queue_depth": _queue.qsize(),
+        "in_progress": _heal_state["in_progress"],
+        "last_result": _heal_state["last_result"],
+    }
+    try:
+        _STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _STATUS_FILE.write_text(json.dumps(status, default=str), encoding="utf-8")
+    except Exception as exc:
+        log.warning("Failed to write heal status: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +140,7 @@ async def _enqueue_failing_async(payload: dict[str, Any]) -> None:
             _queued.add(sid)
             await _queue.put(sid)
             log.info("Enqueued scenario %d for healing.", sid)
+        _write_status()
 
 
 async def _process_webhook(
@@ -173,15 +199,29 @@ async def _worker(loop: asyncio.AbstractEventLoop) -> None:
     while True:
         scenario_id = await _queue.get()
         log.info("▶  Healing scenario %d…", scenario_id)
+        result: HealResult | None = None
+        _heal_state["in_progress"] = {
+            "scenario_id": scenario_id,
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+        _write_status()
         try:
             heal_fn = functools.partial(run_heal, scenario_id, auto_merge=True)
-            result: HealResult = await loop.run_in_executor(None, heal_fn)
+            result = await loop.run_in_executor(None, heal_fn)
             _log_result(scenario_id, result)
         except Exception as exc:
             log.error("Heal failed for scenario %d: %s", scenario_id, exc)
         finally:
+            _heal_state["in_progress"] = None
+            _heal_state["last_result"] = {
+                "scenario_id": scenario_id,
+                "passed": result.passed if result is not None else False,
+                "pr_url": result.pr_url if result is not None else None,
+                "completed_at": datetime.now(UTC).isoformat(),
+            }
             _queued.discard(scenario_id)
             _queue.task_done()
+            _write_status()
 
 
 def _log_result(scenario_id: int, result: HealResult) -> None:
