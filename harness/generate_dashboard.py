@@ -2059,6 +2059,29 @@ function setupRefresh() {
 
 // ── Heal Status Toast ────────────────────────────────────────────────────
 let _healToastTimer = null;
+let _lastSeenCompletedAt = null;
+let _autoRefreshTimer = null;
+let _autoRefreshInterval = null;
+
+function scheduleAutoRefresh(delaySecs) {
+  clearTimeout(_autoRefreshTimer);
+  clearInterval(_autoRefreshInterval);
+  if (!refreshToken) return;
+  let remaining = delaySecs;
+  setRefreshStatus(`Auto-refreshing in ${remaining}s…`, "");
+  _autoRefreshInterval = setInterval(() => {
+    remaining -= 1;
+    if (remaining > 0) {
+      setRefreshStatus(`Auto-refreshing in ${remaining}s…`, "");
+    } else {
+      clearInterval(_autoRefreshInterval);
+    }
+  }, 1000);
+  _autoRefreshTimer = setTimeout(() => {
+    clearInterval(_autoRefreshInterval);
+    refreshDashboard();
+  }, delaySecs * 1000);
+}
 
 async function pollHealStatus() {
   if (!apiAvailable) return;
@@ -2085,6 +2108,11 @@ function renderHealToast(status) {
   const { queue_depth = 0, in_progress, last_result } = status;
 
   if (last_result && !in_progress && queue_depth === 0) {
+    // Auto-refresh dashboard once when a new heal result appears
+    if (last_result.completed_at !== _lastSeenCompletedAt) {
+      _lastSeenCompletedAt = last_result.completed_at;
+      scheduleAutoRefresh(5);
+    }
     const age = Date.now() - new Date(last_result.completed_at).getTime();
     if (age < 12000) {
       clearTimeout(_healToastTimer);
