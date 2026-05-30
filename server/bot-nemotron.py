@@ -65,6 +65,132 @@ from nvidia_stt import NVidiaWebSocketSTTService
 load_dotenv(override=True)
 
 
+# --- Date-of-birth parsing ----------------------------------------------------
+# Nemotron mis-converts spoken dates ("April twelfth nineteen eighty-five" ->
+# "1985-12-12") and narrates the conversion aloud. So we take the date of birth
+# from the caller verbatim and normalize it to YYYY-MM-DD here in code instead of
+# trusting the model to do it.
+
+_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11,
+    "december": 12, "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+    "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}  # fmt: skip
+
+# Cardinal + ordinal words 0–19, plus the round ordinals used for days.
+_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19, "first": 1, "second": 2, "third": 3,
+    "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9,
+    "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
+    "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
+    "nineteenth": 19, "twentieth": 20, "thirtieth": 30,
+}  # fmt: skip
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}  # fmt: skip
+_NUMBER_WORDS = set(_UNITS) | set(_TENS) | {"hundred", "thousand", "and", "oh", "o"}
+
+
+def _word_num(tokens: list[str]) -> int | None:
+    """Additive spelled-number -> int (ones/teens/tens/hundred/thousand)."""
+    total, current, seen = 0, 0, False
+    for t in tokens:
+        if t in _UNITS:
+            current += _UNITS[t]
+        elif t in _TENS:
+            current += _TENS[t]
+        elif t == "hundred":
+            current = (current or 1) * 100
+        elif t == "thousand":
+            total += (current or 1) * 1000
+            current = 0
+        elif t in ("and", "oh", "o"):
+            continue
+        else:
+            return None
+        seen = True
+    return total + current if seen else None
+
+
+def _word_year(tokens: list[str]) -> int | None:
+    """Spelled year -> int, including the "nineteen eighty-five" pair idiom."""
+    if not tokens:
+        return None
+    if "thousand" in tokens or "hundred" in tokens:
+        return _word_num(tokens)
+    head = tokens[0]
+    if head in _UNITS and 10 <= _UNITS[head] <= 19:
+        century = _UNITS[head]
+    elif head in _TENS:
+        century = _TENS[head]
+    else:
+        return _word_num(tokens)
+    rest = _word_num(tokens[1:]) if len(tokens) > 1 else 0
+    return century * 100 + (rest or 0)
+
+
+def _fmt_date(year: int, month: int, day: int) -> str | None:
+    if 1 <= month <= 12 and 1 <= day <= 31 and 1900 <= year <= 2100:
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    return None
+
+
+def _parse_dob(spoken: str) -> str | None:
+    """Normalize a spoken or written date of birth to ISO YYYY-MM-DD, or None."""
+    if not spoken:
+        return None
+    txt = re.sub(r"(\d+)(st|nd|rd|th)\b", r"\1", spoken.strip().lower())
+
+    if m := re.search(r"\b(\d{4})\D(\d{1,2})\D(\d{1,2})\b", txt):  # ISO-ish
+        return _fmt_date(int(m[1]), int(m[2]), int(m[3]))
+    if m := re.search(r"\b(\d{1,2})\D(\d{1,2})\D(\d{4})\b", txt):  # US M/D/Y
+        return _fmt_date(int(m[3]), int(m[1]), int(m[2]))
+    if m := re.search(r"\b(\d{8})\b", txt):  # YYYYMMDD or MMDDYYYY
+        b = m[1]
+        return _fmt_date(int(b[:4]), int(b[4:6]), int(b[6:])) or _fmt_date(
+            int(b[4:]), int(b[:2]), int(b[2:4])
+        )
+
+    month = next((n for name, n in _MONTHS.items() if re.search(rf"\b{name}\b", txt)), None)
+    if month is None:
+        return None
+    toks = [t for t in re.split(r"[^a-z0-9]+", txt) if t]
+
+    def _day_from(prefix: list[str]) -> int | None:
+        d = next((int(t) for t in prefix if t.isdigit() and 1 <= int(t) <= 31), None)
+        if d is None:
+            dw = [t for t in prefix if t in _UNITS or t in _TENS]
+            d = _word_num(dw) if dw else None
+        return d if d and 1 <= d <= 31 else None
+
+    # Year is an explicit 4-digit token or a trailing run of number-words. A day
+    # word ("nineteenth") can look like a year's century, so accept the earliest
+    # split that yields BOTH a valid year and a valid day from the leftovers.
+    candidates: list[tuple[int, tuple[int, int]]] = []
+    candidates += [
+        (int(t), (i, i + 1))
+        for i, t in enumerate(toks)
+        if t.isdigit() and len(t) == 4 and 1900 <= int(t) <= 2025
+    ]
+    for start in range(len(toks)):
+        run = toks[start:]
+        if run and all(t in _NUMBER_WORDS for t in run):
+            y = _word_year(run)
+            if y and 1900 <= y <= 2025:
+                candidates.append((y, (start, len(toks))))
+
+    for year, (a, b) in candidates:
+        day = _day_from([t for i, t in enumerate(toks) if not (a <= i < b)])
+        if day is not None:
+            return _fmt_date(year, month, day)
+    return None
+
+
 async def get_call_info(call_sid: str) -> dict:
     """Fetch call information from Twilio REST API using aiohttp.
 
@@ -144,8 +270,12 @@ async def run_bot(
         return set(a.split()).issubset(set(b.split()))
 
     def _dob_matches(spoken: str, record_dob: str) -> bool:
-        # Compare by digit sequence so separators/spacing don't matter, but the
-        # date itself must be exactly right (security: DOB stays a hard match).
+        # Parse the spoken date in code (the model mis-converts dates), then
+        # require an exact match against the record — DOB stays a hard check.
+        parsed = _parse_dob(spoken)
+        if parsed is not None:
+            return parsed == record_dob
+        # Fallback: the model may have passed an already-correct ISO date.
         return re.sub(r"\D", "", spoken) == re.sub(r"\D", "", record_dob)
 
     def _find_patient(full_name: str, date_of_birth: str | None = None) -> dict | None:
@@ -172,9 +302,9 @@ async def run_bot(
 
         Args:
             full_name: The caller's full name, first and last.
-            date_of_birth: The caller's date of birth in ISO format YYYY-MM-DD.
-                Convert whatever the caller says (e.g. "April 12th, 1985") into
-                this format before calling.
+            date_of_birth: The caller's date of birth, passed through exactly as
+                they said it (e.g. "April twelfth, nineteen eighty-five"). Do not
+                convert, reformat, or reorder it — the system normalizes it.
         """
         # DOB must match exactly (digit-for-digit); the name is matched tolerantly
         # so a mis-transcribed name ("Jane Do" for "Jane Doe") still verifies.
@@ -305,10 +435,13 @@ async def run_bot(
         "verify_identity right away. Do NOT say 'let me check', 'hold on', 'one "
         "moment', or 'verifying' first, and do NOT read the date back or explain "
         "the format. Just call the tool, then speak the result.\n"
+        "- When verify_identity returns verified=true, say a short explicit "
+        'confirmation out loud (e.g. "Thanks, you\'re verified.") before asking '
+        "how you can help.\n"
         "- Same for get_prescriptions and refill_prescription: call the tool "
         "immediately, don't announce it.\n"
-        "- Convert the date of birth to YYYY-MM-DD silently; never say the digits "
-        "out loud.\n"
+        "- Pass the date of birth to verify_identity exactly as the caller said it; "
+        "do not convert or reformat it, and never read it back out loud.\n"
         "- Don't ask for the name or date of birth again once the caller has "
         "given them.\n\n"
         "Once verified, use get_prescriptions to read their medications, refills "
