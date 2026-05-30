@@ -38,6 +38,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.runner.types import (
+    DailyRunnerArguments,
     RunnerArguments,
     SmallWebRTCRunnerArguments,
     WebSocketRunnerArguments,
@@ -47,6 +48,7 @@ from pipecat.serializers.twilio import TwilioFrameSerializer
 from pipecat.services.gradium.tts import GradiumTTSService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
@@ -458,6 +460,20 @@ async def bot(runner_args: RunnerArguments):
                     audio_out_enabled=True,
                     add_wav_header=False,
                     serializer=serializer,
+                ),
+            )
+        case DailyRunnerArguments():
+            # Pipecat Cloud starts WebRTC sessions (e.g. the playground and
+            # Cekura's pipecat_v2 test runs) over a Daily room. Same 16 kHz in /
+            # 24 kHz out defaults as SmallWebRTC, so no sample-rate overrides.
+            transport = DailyTransport(
+                runner_args.room_url,
+                runner_args.token,
+                "Bayview Pharmacy",
+                params=DailyParams(
+                    audio_in_enabled=True,
+                    audio_in_filter=krisp_filter,
+                    audio_out_enabled=True,
                 ),
             )
         case _:
