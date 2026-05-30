@@ -19,10 +19,12 @@ Run the bot using::
     uv run bot-nemotron.py
 """
 
+import json
 import os
 import random
 import re
-from datetime import date
+from datetime import UTC, date, datetime
+from pathlib import Path
 
 import aiohttp
 from dotenv import load_dotenv
@@ -47,10 +49,8 @@ from pipecat.runner.types import (
 )
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.twilio import TwilioFrameSerializer
-from pipecat.services.gradium.stt import GradiumSTTService
 from pipecat.services.gradium.tts import GradiumTTSService
 from pipecat.services.llm_service import FunctionCallParams
-from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams, DailyTransport
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
@@ -62,6 +62,7 @@ from pipecat.workers.runner import WorkerRunner
 
 from mock_backend import PATIENTS
 from nemotron_llm import VLLMOpenAILLMService
+from stt_provider import create_stt_service, get_stt_provider
 from video_avatar import (
     AVATAR_PROVIDER_NONE,
     AvatarConfigError,
@@ -134,6 +135,9 @@ async def run_bot(
         avatar_provider: Optional video avatar renderer for WebRTC calls.
     """
     logger.info("Starting bot")
+
+    # Track call start time for transcript saving
+    _call_info: dict = {"start": None}
 
     # Per-call state. Closed over by the tool functions below so each call gets
     # its own isolated session. `verified` flips True ONLY on a successful
@@ -352,18 +356,10 @@ async def run_bot(
         f"Today is {date.today().strftime('%A, %B %d, %Y')}."
     )
 
-    # Speech-to-Text service
-    #
-    # Gradium STT — no external WebSocket to manage, no startup failure path.
-    # Replaces NVidiaWebSocketSTTService which was crashing the entire pipeline
-    # on connection failure (the NVIDIA ASR WebSocket re-raises on any connect
-    # error, killing the pipeline before the bot can speak at all).
-    stt = GradiumSTTService(
-        api_key=os.environ["GRADIUM_API_KEY"],
-        settings=GradiumSTTService.Settings(
-            language=Language.EN,
-        ),
-    )
+    # Speech-to-text service. Gradium remains the default. Set
+    # STT_PROVIDER=parakeet to use the NVIDIA Parakeet websocket when available.
+    stt = await create_stt_service(audio_in_sample_rate=audio_in_sample_rate)
+    logger.info(f"Speech-to-text provider requested: {get_stt_provider()}")
 
     # LLM service — Nemotron-3-Super-120B served by vLLM (OpenAI-compatible chat
     # completions at /v1). vLLM exposes the Chat Completions API, not the Responses
@@ -473,6 +469,7 @@ async def run_bot(
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
+        _call_info["start"] = datetime.now(UTC)
         logger.info("Client connected")
         # Kick off the conversation
         context.add_message(
@@ -503,6 +500,38 @@ async def run_bot(
     finally:
         if avatar_session and not avatar_session.closed:
             await avatar_session.close()
+
+        # Save transcript for the Call History dashboard
+        end_time = datetime.now(UTC)
+        start_time = _call_info.get("start") or end_time
+        duration_s = int((end_time - start_time).total_seconds())
+
+        turns = [
+            {"role": m["role"], "content": m.get("content") or ""}
+            for m in context.messages
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ]
+
+        if turns:
+            ts = end_time.strftime("%Y%m%dT%H%M%S")
+            transcript_dir = (
+                Path(__file__).resolve().parents[1] / "harness" / "runs" / "transcripts"
+            )
+            transcript_dir.mkdir(parents=True, exist_ok=True)
+            out = transcript_dir / f"{ts}-live.json"
+            out.write_text(
+                json.dumps(
+                    {
+                        "source": "live",
+                        "timestamp": end_time.isoformat(),
+                        "duration_s": duration_s,
+                        "transcript": turns,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            logger.info(f"Transcript saved: {out}")
 
 
 async def bot(runner_args: RunnerArguments):

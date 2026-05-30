@@ -211,7 +211,7 @@ class NVidiaWebSocketSTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:  # pyright: ignore[reportIncompatibleMethodOverride]
         """Send audio data to NVIDIA ASR server for transcription.
 
         Args:
@@ -240,11 +240,7 @@ class NVidiaWebSocketSTTService(WebsocketSTTService):
             return
 
         # UserAudioRawFrame contains a user_id (e.g. Daily, Livekit)
-        if hasattr(frame, "user_id"):
-            self._user_id = frame.user_id
-        # AudioRawFrame does not have a user_id (e.g. SmallWebRTCTransport, websockets)
-        else:
-            self._user_id = ""
+        self._user_id = str(getattr(frame, "user_id", ""))
 
         self._last_audio_time = time.monotonic()
 
@@ -388,7 +384,10 @@ class NVidiaWebSocketSTTService(WebsocketSTTService):
 
             # Wait for ready message
             try:
-                ready_msg = await asyncio.wait_for(self._websocket.recv(), timeout=5.0)
+                websocket = self._websocket
+                if not websocket:
+                    raise RuntimeError("websocket disconnected before ready")
+                ready_msg = await asyncio.wait_for(websocket.recv(), timeout=5.0)
                 data = json.loads(ready_msg)
                 if data.get("type") == "ready":
                     self._ready = True

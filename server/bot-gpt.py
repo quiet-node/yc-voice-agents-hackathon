@@ -44,11 +44,9 @@ from pipecat.runner.types import (
 )
 from pipecat.runner.utils import parse_telephony_websocket
 from pipecat.serializers.twilio import TwilioFrameSerializer
-from pipecat.services.gradium.stt import GradiumSTTService
 from pipecat.services.gradium.tts import GradiumTTSService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.openai.responses.llm import OpenAIResponsesLLMService
-from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
@@ -57,6 +55,7 @@ from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategie
 from pipecat.workers.runner import WorkerRunner
 
 from mock_backend import PATIENTS
+from stt_provider import create_stt_service, get_stt_provider
 from video_avatar import (
     AVATAR_PROVIDER_NONE,
     AvatarConfigError,
@@ -297,13 +296,10 @@ async def run_bot(
         f"Today is {date.today().strftime('%A, %B %d, %Y')}."
     )
 
-    # Speech-to-Text service
-    stt = GradiumSTTService(
-        api_key=os.environ["GRADIUM_API_KEY"],
-        settings=GradiumSTTService.Settings(
-            language=Language.EN,
-        ),
-    )
+    # Speech-to-text service. Gradium remains the default. Set
+    # STT_PROVIDER=parakeet to use the NVIDIA Parakeet websocket when available.
+    stt = await create_stt_service(audio_in_sample_rate=audio_in_sample_rate)
+    logger.info(f"Speech-to-text provider requested: {get_stt_provider()}")
 
     # LLM service
     llm = OpenAIResponsesLLMService(

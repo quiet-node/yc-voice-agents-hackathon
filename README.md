@@ -30,7 +30,7 @@ The dashboard shows live healing status, failure clusters, an evidence explorer,
 
 | Layer | Service |
 |---|---|
-| **STT** | [Gradium](https://gradium.ai) (primary) · Nemotron Speech Streaming (NVIDIA) |
+| **STT** | [Gradium](https://gradium.ai) (default) · NVIDIA Parakeet websocket (optional) |
 | **LLM** | Nemotron 3 Super 120B (NVIDIA/AWS) · GPT-4.1 (fallback) |
 | **TTS** | [Gradium](https://gradium.ai) |
 | **Transport** | SmallWebRTC (local) · Daily (Pipecat Cloud) · Twilio (phone) |
@@ -82,7 +82,9 @@ Open **http://localhost:7860** and click **Connect**. First launch takes ~20s wh
 | `GRADIUM_API_KEY` | STT + TTS |
 | `GRADIUM_VOICE_ID` | TTS voice |
 | `OPENAI_API_KEY` | GPT-4.1 LLM (bot-gpt only) |
-| `NVIDIA_ASR_URL` | Nemotron STT WebSocket |
+| `STT_PROVIDER` | `gradium` by default; set `parakeet` for NVIDIA Parakeet websocket STT |
+| `PARAKEET_STT_URL` | Optional Parakeet websocket URL; falls back to `NVIDIA_ASR_URL` |
+| `NVIDIA_ASR_URL` | NVIDIA Parakeet STT WebSocket |
 | `NEMOTRON_LLM_URL` | Nemotron LLM endpoint |
 | `NEMOTRON_LLM_MODEL` | Model ID |
 | `NEMOTRON_ENABLE_THINKING` | Keep `false` for voice (adds latency, leaks into speech) |
@@ -95,6 +97,7 @@ Open **http://localhost:7860** and click **Connect**. First launch takes ~20s wh
 NVIDIA endpoints (available during the hackathon):
 
 ```bash
+STT_PROVIDER=parakeet
 NVIDIA_ASR_URL=ws://44.241.251.184:8080
 NEMOTRON_LLM_URL=http://nemotron-fleet-alb-1322439314.us-west-2.elb.amazonaws.com/v1
 NEMOTRON_LLM_MODEL=nvidia/nemotron-3-super
