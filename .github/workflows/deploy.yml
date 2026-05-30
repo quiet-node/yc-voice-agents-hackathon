@@ -1,21 +1,14 @@
 name: Deploy to Pipecat Cloud
 
-# Build + deploy the Bayview Pharmacy bot to Pipecat Cloud whenever bot code,
-# the Dockerfile, deploy config, or dependencies land on main. The image is
-# built server-side by Pipecat Cloud (cloud build), so the runner only needs the
-# `pc` CLI and network access. Runtime secrets live in the `bayview-pharmacy-secrets`
-# secret set on Pipecat Cloud (uploaded separately, not by this workflow).
+# Build + deploy the Bayview Pharmacy bot to Pipecat Cloud. This runs ONLY when
+# triggered manually (Actions tab -> "Run workflow", or `gh workflow run deploy.yml`),
+# so a teammate's change that works locally but breaks on Pipecat Cloud never
+# auto-deploys on merge. Trigger it yourself once you've confirmed the change is
+# cloud-good. The image is built server-side by Pipecat Cloud (cloud build), so the
+# runner only needs the `pc` CLI and network access. Runtime secrets live in the
+# `bayview-pharmacy-secrets` secret set on Pipecat Cloud (uploaded separately).
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "server/*.py"
-      - "server/Dockerfile"
-      - "server/pcc-deploy.toml"
-      - "server/pyproject.toml"
-      - "server/uv.lock"
-      - ".github/workflows/deploy.yml"
   workflow_dispatch: {}
 
 # Never let two deploys run at once; queue a newer one behind an in-flight deploy
