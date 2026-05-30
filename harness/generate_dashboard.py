@@ -1200,6 +1200,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       padding: 18px 22px 28px;
       display: grid;
       gap: 16px;
+      align-content: start;
     }
     .kpis {
       display: grid;
@@ -1705,6 +1706,22 @@ function replaceModel(nextModel) {
     || model.clusters[0]?.id
     || null;
   renderAll();
+  autoTriggerHeals();
+}
+
+async function autoTriggerHeals() {
+  if (!apiAvailable) return;
+  const open = model.fix_queue.filter((item) => !_doneItems.has(item.id));
+  for (const item of open) {
+    if (!item.scenario_names || item.scenario_names.length === 0) continue;
+    const alreadyQueued = _currentHealStatus?.queued_items?.some(
+      (q) => item.scenario_names.some((n) => n === q.scenario_name)
+    );
+    const inProgress = _currentHealStatus?.in_progress &&
+      item.scenario_names.includes(_currentHealStatus.in_progress.scenario_name);
+    if (alreadyQueued || inProgress) continue;
+    await triggerHeal(item.scenario_names, item.id, null, null);
+  }
 }
 
 function renderKpis() {
@@ -2235,6 +2252,7 @@ function init() {
   setupRefresh();
   loadServedReport();
   setupHealPolling();
+  autoTriggerHeals();
 }
 
 init();
