@@ -2,6 +2,8 @@
 
 An accessible, video-first pharmacy assistant for prescription refills and recovery — with a **self-improving eval loop** underneath that turns every Cekura failure into a deployed, verified fix.
 
+🎥 **[Watch the demo video](https://www.youtube.com/watch?v=FH_uwZJSRJw)**
+
 Built for the **YC Voice Agents Hackathon** hosted by [Cekura](https://cekura.com) and [Daily](https://daily.co), with [NVIDIA](https://nvidia.com), [AWS](https://aws.amazon.com), and [Twilio](https://twilio.com).
 
 **Hackathon themes, all three covered:** evaluate + improve agent performance (Cekura self-heal loop) · open-weights models (NVIDIA Nemotron) · voice (Pipecat).
