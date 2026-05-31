@@ -796,9 +796,13 @@ async def bot(runner_args: RunnerArguments):
                 "Bayview Pharmacy",
                 params=DailyParams(
                     audio_in_enabled=True,
-                    audio_in_filter=krisp_filter,
+                    # Krisp is for real mic noise; Cekura test agent uses clean TTS —
+                    # keep filter off so synthetic audio isn't suppressed by the voice model.
+                    audio_in_filter=None,
                     audio_out_enabled=True,
-                    vad_analyzer=SileroVADAnalyzer(params=VADParams(start_secs=0.3)),
+                    vad_analyzer=SileroVADAnalyzer(
+                        params=VADParams(start_secs=0.2, stop_secs=0.5)
+                    ),
                 ),
             )
         case _:
