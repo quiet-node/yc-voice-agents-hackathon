@@ -19,7 +19,8 @@ Our goal is to make prescription access easier for millions of disabled and elde
 The product layer includes:
 
 - **Google Meet-style video call UI** with pre-join camera/microphone checks, in-call device controls, scroll-contained transcript, active-speaker indicators, and equal participant video tiles.
-- **AI video avatar layer** that can render a visual pharmacy agent when provider configuration is available, while preserving the existing bot brain and audio path if video rendering is unavailable.
+- **Twilio voice-call support** for patients who still need a normal phone number. The same Pipecat agent logic can answer PSTN calls through a Twilio media stream.
+- **AI video avatar layer** rendered through Pipecat as a presentation layer, while preserving the existing bot brain and audio path if video rendering is unavailable.
 - **Multilingual onboarding** where the agent first asks: "Signify 1 for English, 2 for Spanish." Gesture selection and spoken cues like "Hola" or "2" switch the conversation into Spanish.
 - **Visual cue detection** using MediaPipe-style browser vision. For the hackathon demo, showing a cup can simulate an empty prescription bottle and prompt refill assistance.
 - **Gesture recognition** for language selection and low-friction accessibility workflows.
@@ -45,11 +46,111 @@ The dashboard shows live healing status, failure clusters, an evidence explorer,
 
 ---
 
-## Tech stack
+## Infrastructure Overview
+
+The application is split into three deployable/runtime surfaces:
+
+1. **Pipecat agent runtime** in `server/`
+   - `bot-nemotron.py` is the primary agent.
+   - `bot-gpt.py` is the OpenAI fallback.
+   - The bot is a Pipecat pipeline: transport input -> STT -> language router -> user context aggregator -> LLM -> TTS -> optional video avatar renderer -> transport output.
+   - The pharmacy tools are registered directly on the LLM service and call the mocked backend in `mock_backend.py`.
+   - The same business logic runs across video calls, Pipecat Cloud sessions, and Twilio voice calls.
+
+2. **Browser video-call client** in `server/demo_client/`
+   - Served locally by `demo_frontend.py` through the Pipecat runner app.
+   - Uses WebRTC for media, an RTVI data channel for transcript/control messages, and browser APIs for camera, microphone, speaker selection, and audio-level checks.
+   - Runs MediaPipe Tasks Vision in the browser for object and gesture recognition. The server does not need to receive raw camera frames for the demo cue logic.
+
+3. **Twilio voice-call path**
+   - Twilio calls connect to the same Pipecat agent through `FastAPIWebsocketTransport`.
+   - `parse_telephony_websocket` extracts the stream and call identifiers.
+   - `TwilioFrameSerializer` handles Twilio media stream framing.
+   - The voice path uses 8 kHz input/output sample rates and disables the video/avatar layer because PSTN calls are audio-only.
+
+4. **Self-improvement harness** in `harness/`
+   - `generate_dashboard.py` normalizes Cekura run output into `report.json`, `fix_plan.md`, and a static dashboard.
+   - `serve_dashboard.py` serves the dashboard and local API endpoints for refresh, transcripts, generated tests, and healing status.
+   - `webhook_server.py` receives Cekura webhook failures.
+   - `self_heal.py` applies a targeted fix, deploys through Pipecat Cloud, re-runs the same Cekura scenario, and opens a PR only when the result improves.
+
+### Runtime Pipeline
+
+```text
+Browser / Phone caller
+        |
+        v
+Pipecat transport
+  - SmallWebRTC locally
+  - Daily in Pipecat Cloud
+  - Twilio websocket for phone calls
+        |
+        v
+Speech-to-text
+  - Gradium by default
+  - optional NVIDIA Parakeet websocket service
+        |
+        v
+LanguagePreferenceProcessor
+  - detects English/Spanish selection from speech cues
+  - supports "Hola", "2", "dos", "Spanish", "English", "1"
+        |
+        v
+LLM
+  - Nemotron 3 Super 120B primary path
+  - GPT-4.1 fallback path
+        |
+        v
+Pharmacy tools
+  - verify_identity
+  - get_prescriptions
+  - refill_prescription
+  - end_call
+        |
+        v
+Gradium TTS -> Pipecat output -> caller
+```
+
+### Hugging Face / NVIDIA Model Integration
+
+We did not put large Hugging Face model weights inside the bot container. The bot stays lightweight and calls model services over the network.
+
+For speech recognition, we implemented an optional NVIDIA Parakeet STT path:
+
+- `stt_provider.py` selects the STT backend from `STT_PROVIDER`.
+- `STT_PROVIDER=gradium` uses Gradium as the production-safe default.
+- `STT_PROVIDER=parakeet` creates `NVidiaWebSocketSTTService` from `nvidia_stt.py`.
+- `nvidia_stt.py` streams Pipecat `UserAudioRawFrame` audio to the NVIDIA Parakeet websocket endpoint and converts websocket transcripts back into Pipecat `TranscriptionFrame` and `InterimTranscriptionFrame` objects.
+- The service expects 16 kHz mono PCM, so WebRTC/Daily calls use it directly. Twilio's 8 kHz path falls back to Gradium unless explicitly overridden.
+
+This is the Hugging Face/NVIDIA implementation pattern: the Parakeet-family ASR model is available through Hugging Face/NVIDIA resources, but our application consumes it as a hosted websocket ASR service. Pipecat handles audio transport, frame processing, turn aggregation, LLM orchestration, and TTS. That kept the demo deployable on Pipecat Cloud without shipping local GPU model weights in the application image.
+
+### Pipecat Execution Model
+
+Local execution uses the Pipecat runner:
+
+```bash
+cd server
+STT_PROVIDER=parakeet uv run bot-nemotron.py
+```
+
+The app mounts the video UI at `http://localhost:7860/demo/` and exposes Pipecat's local `/start` flow for a SmallWebRTC call. The browser creates the offer, Pipecat starts the session, and the bot pipeline begins once the WebRTC transport connects.
+
+Cloud execution uses Pipecat Cloud:
+
+- `Dockerfile` starts from `dailyco/pipecat-base:latest`.
+- Pipecat Cloud expects `bot.py`, so the image copies `bot-nemotron.py` to `bot.py`.
+- Supporting modules are copied into the image: `mock_backend.py`, `nemotron_llm.py`, `nvidia_stt.py`, `stt_provider.py`, `language_router.py`, and `video_avatar.py`.
+- Pipecat Cloud starts WebRTC sessions over Daily rooms; the same bot code handles `DailyRunnerArguments`.
+- Twilio phone calls use the Pipecat websocket transport and the same core agent logic. The audio stream is serialized through `TwilioFrameSerializer`, sample-rate overrides are set to 8 kHz, and video/avatar output is disabled for the PSTN path.
+
+---
+
+## Tech Stack
 
 | Layer | Service |
 |---|---|
-| **STT** | [Gradium](https://gradium.ai) (default) · NVIDIA Parakeet websocket (optional) |
+| **STT** | [Gradium](https://gradium.ai) default · NVIDIA Parakeet websocket service optional |
 | **LLM** | Nemotron 3 Super 120B (NVIDIA/AWS) · GPT-4.1 (fallback) |
 | **TTS** | [Gradium](https://gradium.ai) |
 | **Transport** | SmallWebRTC (local video) · Daily (Pipecat Cloud) · Twilio (phone) |
@@ -59,7 +160,7 @@ The dashboard shows live healing status, failure clusters, an evidence explorer,
 | **Healing** | Claude (claude-sonnet-4-6 via Anthropic API) |
 | **Video UI** | Browser WebRTC demo client in `server/demo_client/` |
 | **Vision/Gestures** | MediaPipe Tasks Vision in the browser |
-| **Avatar layer** | Optional AI video avatar provider; audio-only fallback by default |
+| **Avatar layer** | Optional Pipecat video renderer; audio-only fallback by default |
 
 Bot files in `server/`:
 - `bot-nemotron.py` — primary (Gradium STT + Nemotron LLM + Gradium TTS)
@@ -117,13 +218,14 @@ The local demo opens a video-call interface with:
 | `NEMOTRON_LLM_URL` | Nemotron LLM endpoint |
 | `NEMOTRON_LLM_MODEL` | Model ID |
 | `NEMOTRON_ENABLE_THINKING` | Keep `false` for voice (adds latency, leaks into speech) |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` | Optional Twilio REST lookup for call metadata |
 | `ENV` | Set `local` for local dev — required |
 | `CEKURA_API_KEY` | For self-healing harness |
 | `ANTHROPIC_API_KEY` | For Claude patch proposals |
 | `NGROK_DOMAIN` | Static ngrok domain for Cekura webhooks |
 | `CEKURA_WEBHOOK_SECRET` | Shared secret for webhook auth |
-| `AVATAR_PROVIDER` | Optional video avatar layer; defaults to audio-only |
-| `TAVUS_API_KEY` / `TAVUS_REPLICA_ID` | Optional avatar provider credentials when using the current avatar integration |
+| `AVATAR_PROVIDER` | Optional Pipecat video avatar layer; defaults to `none` for audio-only |
+| `AVATAR_VIDEO_WIDTH` / `AVATAR_VIDEO_HEIGHT` | Output dimensions for optional avatar video tracks |
 
 NVIDIA endpoints (available during the hackathon):
 

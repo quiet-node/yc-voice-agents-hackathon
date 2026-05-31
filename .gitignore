@@ -207,6 +207,9 @@ cython_debug/
 # Claude Code local state
 .claude/
 
+# Local presentation notes
+DEMO_SCRIPT.md
+
 # PyPI configuration file
 .pypirc
 
