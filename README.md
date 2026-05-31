@@ -1,12 +1,31 @@
-# Voice Agent Self-Improvement Harness
+# Bayview Pharmacy Video Agent
 
-A production-grade voice AI agent with a fully autonomous self-healing loop — built for the YC Voice Agents Hackathon hosted by [Cekura](https://cekura.com) and [Daily](https://daily.co), in partnership with [NVIDIA](https://nvidia.com), [AWS](https://aws.amazon.com), and [Twilio](https://twilio.com).
+An accessible video-first pharmacy assistant for prescription recovery, refill support, and medication-status calls — with a self-improving voice-agent harness underneath.
+
+Built for the YC Voice Agents Hackathon hosted by [Cekura](https://cekura.com) and [Daily](https://daily.co), in partnership with [NVIDIA](https://nvidia.com), [AWS](https://aws.amazon.com), and [Twilio](https://twilio.com).
+
+## Why this matters
+
+For many families, prescription recovery is not a simple phone call. Elderly patients, stroke survivors, people with speech or hearing challenges, and family caregivers often have to navigate long phone trees, repeat sensitive information, and understand medication instructions through audio alone. That experience is especially hard when word recognition, recall, or confidence on the phone has been affected by disability or age.
+
+**Bayview Pharmacy** turns that call into a video conversation with a visible AI pharmacy assistant. The agent can speak, listen, show a human-like visual presence, support English and Spanish, and use video cues to understand the caller's context. A visual face and lip movement can make speech easier to follow for patients who rely on visual word recognition, while video and gesture support reduce the burden of navigating a phone-only system.
+
+Our goal is to make prescription access easier for millions of disabled and elderly patients who are underserved by traditional call centers. Instead of forcing every patient through the same audio-only workflow, Bayview gives them a more human, multimodal, multilingual way to recover and manage critical medication access.
 
 ## What we built
 
-**Bayview Pharmacy** — a secure prescription-refill voice agent that verifies caller identity before revealing any prescription data, checking refill status, or placing a refill. All backend calls are mocked so it runs with only AI service keys.
+**Bayview Pharmacy** is a secure prescription-refill and recovery agent that verifies caller identity before revealing any prescription data, checking refill status, or placing a refill. All backend calls are mocked so it runs with only AI service keys.
 
-On top of the agent, we built a **self-improvement harness** that closes the loop between Cekura evaluations and code changes — automatically:
+The product layer includes:
+
+- **Google Meet-style video call UI** with pre-join camera/microphone checks, in-call device controls, scroll-contained transcript, active-speaker indicators, and equal participant video tiles.
+- **AI video avatar layer** that can render a visual pharmacy agent when provider configuration is available, while preserving the existing bot brain and audio path if video rendering is unavailable.
+- **Multilingual onboarding** where the agent first asks: "Signify 1 for English, 2 for Spanish." Gesture selection and spoken cues like "Hola" or "2" switch the conversation into Spanish.
+- **Visual cue detection** using MediaPipe-style browser vision. For the hackathon demo, showing a cup can simulate an empty prescription bottle and prompt refill assistance.
+- **Gesture recognition** for language selection and low-friction accessibility workflows.
+- **Secure pharmacy flow** with identity verification before prescription disclosure or refill actions.
+
+Underneath the product, we built a **self-improvement harness** that closes the loop between Cekura evaluations and code changes — automatically:
 
 ```
 Cekura detects failure
@@ -33,11 +52,14 @@ The dashboard shows live healing status, failure clusters, an evidence explorer,
 | **STT** | [Gradium](https://gradium.ai) (default) · NVIDIA Parakeet websocket (optional) |
 | **LLM** | Nemotron 3 Super 120B (NVIDIA/AWS) · GPT-4.1 (fallback) |
 | **TTS** | [Gradium](https://gradium.ai) |
-| **Transport** | SmallWebRTC (local) · Daily (Pipecat Cloud) · Twilio (phone) |
+| **Transport** | SmallWebRTC (local video) · Daily (Pipecat Cloud) · Twilio (phone) |
 | **Orchestration** | [Pipecat](https://pipecat.ai) |
 | **Deploy** | [Pipecat Cloud](https://pipecat.daily.co) |
 | **Eval** | [Cekura](https://cekura.com) |
 | **Healing** | Claude (claude-sonnet-4-6 via Anthropic API) |
+| **Video UI** | Browser WebRTC demo client in `server/demo_client/` |
+| **Vision/Gestures** | MediaPipe Tasks Vision in the browser |
+| **Avatar layer** | Optional AI video avatar provider; audio-only fallback by default |
 
 Bot files in `server/`:
 - `bot-nemotron.py` — primary (Gradium STT + Nemotron LLM + Gradium TTS)
@@ -73,7 +95,14 @@ uv run bot-nemotron.py   # NVIDIA stack (primary)
 uv run bot-gpt.py        # OpenAI stack (fallback)
 ```
 
-Open **http://localhost:7860** and click **Connect**. First launch takes ~20s while Pipecat downloads VAD + turn-detection models.
+Open **http://localhost:7860** and click **Join now**. First launch takes ~20s while Pipecat downloads VAD + turn-detection models.
+
+The local demo opens a video-call interface with:
+- Camera, microphone, and speaker selectors before and during the call
+- Transcript/chat on the right side
+- Visual detection and gesture recognition badges
+- AI avatar status
+- Language selection as the first agent question
 
 ### Key `.env` variables
 
@@ -93,6 +122,8 @@ Open **http://localhost:7860** and click **Connect**. First launch takes ~20s wh
 | `ANTHROPIC_API_KEY` | For Claude patch proposals |
 | `NGROK_DOMAIN` | Static ngrok domain for Cekura webhooks |
 | `CEKURA_WEBHOOK_SECRET` | Shared secret for webhook auth |
+| `AVATAR_PROVIDER` | Optional video avatar layer; defaults to audio-only |
+| `TAVUS_API_KEY` / `TAVUS_REPLICA_ID` | Optional avatar provider credentials when using the current avatar integration |
 
 NVIDIA endpoints (available during the hackathon):
 
@@ -224,6 +255,11 @@ uv run python3 ../harness/generate_dashboard.py \
 ```
 
 Output: `index.html` (dashboard), `report.json` (machine-readable), `fix_plan.md` (human-readable).
+
+The dashboard sidebar also includes hard-coded sample agents for demo storytelling:
+- **Bayview Pharmacy** — real current report data
+- **Voice Agent Auto-Improvement** — sample self-healing metrics
+- **Voice Agent Scammer Detection** — sample fraud-detection metrics
 
 ### ngrok setup
 
