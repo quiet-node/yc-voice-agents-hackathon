@@ -160,7 +160,33 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/transcripts":
             self._serve_transcripts()
             return
+        if parsed.path == "/api/scenarios":
+            self._serve_scenarios()
+            return
         super().do_GET()
+
+    def _serve_scenarios(self) -> None:
+        """Return all Cekura scenarios for the configured agent."""
+        api_key = env_value("CEKURA_API_KEY")
+        agent_id = self.server.state.cekura_agent_id
+        scenarios: list[dict[str, Any]] = []
+        try:
+            page = 1
+            while True:
+                query = urllib.parse.urlencode({"agent_id": agent_id, "page": page})
+                data = cekura_get(f"/test_framework/v1/scenarios/?{query}", api_key)
+                for s in data.get("results", []):
+                    scenarios.append({
+                        "id": s.get("id"),
+                        "name": s.get("name", ""),
+                        "personality": s.get("personality", {}).get("name", "") if isinstance(s.get("personality"), dict) else "",
+                    })
+                if not data.get("next"):
+                    break
+                page += 1
+            self.send_json({"ok": True, "scenarios": scenarios})
+        except Exception as exc:  # noqa: BLE001
+            self.send_json({"ok": False, "error": str(exc)}, status=502)
 
     def _serve_transcripts(self) -> None:
         """Scan harness/runs for live call transcripts and eval run results."""

@@ -1842,6 +1842,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <button class="active" data-view="overview">Overview</button>
           <button data-view="matrix">Matrix</button>
           <button data-view="runs">Runs</button>
+          <button data-view="scenarios">Scenarios</button>
           <button data-view="callhistory">Call History</button>
           <button data-view="newtest">New Test</button>
         </div>
@@ -1888,6 +1889,10 @@ HTML_TEMPLATE = r"""<!doctype html>
     <section class="panel view view-runs hidden">
       <div class="panel-title"><h2>Run Facts</h2><span class="pill low">normalized evidence</span></div>
       <div class="panel-body matrix" id="runs"></div>
+    </section>
+    <section class="panel view view-scenarios hidden">
+      <div class="panel-title"><h2>All Scenarios</h2><span id="scenarios-count" class="pill low"></span></div>
+      <div class="panel-body" id="scenarios-list"><div class="transcript-empty">Loading…</div></div>
     </section>
     <section class="panel view view-callhistory hidden">
       <div class="panel-title"><h2>Call History</h2><span id="callhistory-count" class="pill low"></span></div>
@@ -2747,6 +2752,53 @@ function renderRuns() {
   `;
 }
 
+// ── All Scenarios panel ───────────────────────────────────────────────────────
+let _scenariosLoaded = false;
+
+async function loadAllScenarios() {
+  if (_scenariosLoaded) return;
+  const listEl = document.getElementById("scenarios-list");
+  const countEl = document.getElementById("scenarios-count");
+  listEl.innerHTML = `<div class="transcript-empty">Fetching from Cekura…</div>`;
+  try {
+    const res = await fetch("/api/scenarios");
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok || !payload.ok) {
+      listEl.innerHTML = `<div class="transcript-empty">Failed to load: ${escapeHtml(payload.error || "unknown error")}</div>`;
+      return;
+    }
+    const scenarios = payload.scenarios || [];
+    _scenariosLoaded = true;
+    countEl.textContent = `${scenarios.length} scenarios`;
+    if (!scenarios.length) {
+      listEl.innerHTML = `<div class="transcript-empty">No scenarios found for this agent.</div>`;
+      return;
+    }
+    listEl.innerHTML = `
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Name</th><th>Personality</th><th></th></tr>
+        </thead>
+        <tbody>
+          ${scenarios.map((s) => `
+            <tr>
+              <td class="meta">${escapeHtml(String(s.id))}</td>
+              <td><strong>${escapeHtml(s.name)}</strong></td>
+              <td class="meta">${escapeHtml(s.personality || "—")}</td>
+              <td><button class="matrix-run-btn scenario-run-btn" data-scenario="${escapeHtml(s.name)}" type="button">▶ Run</button></td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+    listEl.querySelectorAll(".scenario-run-btn").forEach((btn) => {
+      btn.addEventListener("click", () => runScenario([btn.dataset.scenario], btn));
+    });
+  } catch (err) {
+    listEl.innerHTML = `<div class="transcript-empty">Error: ${escapeHtml(String(err))}</div>`;
+  }
+}
+
 function setupViews() {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2756,6 +2808,9 @@ function setupViews() {
       document.querySelector(`.view-${button.dataset.view}`).classList.remove("hidden");
       if (button.dataset.view === "callhistory") {
         loadCallHistory();
+      }
+      if (button.dataset.view === "scenarios") {
+        loadAllScenarios();
       }
     });
   });
@@ -3093,6 +3148,13 @@ function renderHealToast(status) {
     if (last_result.completed_at !== _lastSeenCompletedAt) {
       _lastSeenCompletedAt = last_result.completed_at;
       scheduleAutoRefresh(5);
+      // Auto-mark the fix_queue item done so autoTriggerHeals won't re-enqueue it
+      if (last_result.passed) {
+        const healed = model.fix_queue.find(
+          (i) => i.scenario_names && i.scenario_names.includes(last_result.scenario_name)
+        );
+        if (healed) markDone(healed.id, null);
+      }
     }
     const age = Date.now() - new Date(last_result.completed_at).getTime();
     if (age < 12000) {

@@ -47,6 +47,7 @@ log = logging.getLogger("webhook")
 _queue: asyncio.Queue[int] = asyncio.Queue()
 _queued: set[int] = set()              # IDs currently queued OR in-progress
 _queued_names: dict[int, str] = {}     # ID → display name
+_healed_success: set[int] = set()     # IDs that already passed healing this session
 _lock: asyncio.Lock = asyncio.Lock()
 _heal_state: dict[str, Any] = {
     "in_progress": None,
@@ -141,6 +142,9 @@ async def _enqueue_failing_async(payload: dict[str, Any]) -> None:
 
     async with _lock:
         for sid, name in failing:
+            if sid in _healed_success:
+                log.info("Scenario %d already healed and passed this session — skipping.", sid)
+                continue
             if sid in _queued:
                 log.info("Scenario %d already queued/in-progress — skipping.", sid)
                 continue
@@ -210,6 +214,8 @@ async def handle_internal_enqueue(request: web.Request) -> web.Response:
         return web.Response(status=400, text="scenario_id must be an integer")
 
     async with _lock:
+        if scenario_id in _healed_success:
+            return web.json_response({"ok": True, "message": "already healed and passed"})
         if scenario_id in _queued:
             return web.json_response({"ok": True, "message": "already queued"})
         _queued.add(scenario_id)
@@ -265,6 +271,8 @@ async def _worker(loop: asyncio.AbstractEventLoop) -> None:
                 "pr_url": result.pr_url if result is not None else None,
                 "completed_at": datetime.now(UTC).isoformat(),
             }
+            if result is not None and result.passed:
+                _healed_success.add(scenario_id)
             _queued.discard(scenario_id)
             _queued_names.pop(scenario_id, None)
             _queue.task_done()
