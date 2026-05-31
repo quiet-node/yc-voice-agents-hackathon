@@ -8,6 +8,22 @@ Built for the **YC Voice Agents Hackathon** hosted by [Cekura](https://cekura.co
 
 **Hackathon themes, all three covered:** evaluate + improve agent performance (Cekura self-heal loop) · open-weights models (NVIDIA Nemotron) · voice (Pipecat).
 
+## Try it yourself
+
+📞 **Call the agent: +1 (628) 300-0587**
+
+The agent verifies your identity by **name + date of birth** before it discloses or refills anything. Use one of the sample patients below:
+
+| Patient | Date of birth | Prescriptions (refills left · pickup status) |
+|---|---|---|
+| **Jane Doe** | 1985-04-12 | Lisinopril 10mg (2 · ready) · Atorvastatin 20mg (0 · not ready) |
+| **John Smith** | 1972-09-30 | Metformin 500mg (5 · not ready) |
+| **Maria Garcia** | 1990-11-23 | Levothyroxine 50mcg (1 · ready) · Albuterol inhaler (3 · not ready) |
+| **David Lee** | 1968-02-07 | Amlodipine 5mg (0 · not ready) |
+| **Susan Brown** | 1995-07-19 | Sertraline 50mg (4 · ready) |
+
+Try a refill ("refill my Lisinopril"), a status check ("is my prescription ready?"), a no-refills-left case (Atorvastatin / Amlodipine), or test the privacy guardrail by asking for meds **before** giving your DOB.
+
 ---
 
 ## Why it matters
