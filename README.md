@@ -29,7 +29,7 @@ We forked the starter's flower-shop ordering bot and rebuilt it end to end. **Ne
 
 ## How we used Cekura, Nemotron, and Pipecat
 
-- **Cekura — eval + self-improvement (the centerpiece).** Cekura runs real scored conversations against the deployed agent. We wired its failure webhooks into an automated loop: a failed scenario becomes a regression test, Claude proposes a targeted patch, we redeploy, and Cekura **re-runs the same scenario**. A PR opens **only when the re-run score improves** — so every merged change is a measured gain, not a guess.
+- **Cekura — eval + self-improvement (the centerpiece).** Cekura runs real scored conversations against the deployed agent. We wired its failure webhooks into an automated loop: a failed scenario becomes a regression test, GPT-5.5 proposes a targeted patch, we redeploy, and Cekura **re-runs the same scenario**. A PR opens **only when the re-run score improves** — so every merged change is a measured gain, not a guess.
 - **NVIDIA Nemotron — open weights.** Nemotron 3 Super 120B is the primary LLM (GPT-4.1 is the fallback), and we added an optional NVIDIA Parakeet websocket STT path. Weights stay out of the container — the bot consumes them as hosted services, so it deploys to Pipecat Cloud with no local GPU.
 - **Pipecat — voice + video orchestration.** One pipeline (transport → STT → language router → LLM + tools → TTS → optional avatar) runs identically across local WebRTC, Daily on Pipecat Cloud, and Twilio phone calls.
 
@@ -38,7 +38,7 @@ We forked the starter's flower-shop ordering bot and rebuilt it end to end. **Ne
 ```
 Cekura detects failure
    → webhook_server.py receives + dedupes the event
-   → self_heal.py asks Claude for a targeted patch to bot-nemotron.py
+   → self_heal.py asks GPT-5.5 (via token router) for a targeted patch to bot-nemotron.py
    → patch applied → pc cloud deploy
    → Cekura re-runs the same scenario
    → score improved? open a PR.  no change? discard.
@@ -70,7 +70,7 @@ Gradium TTS  →  optional video avatar  →  caller
 | **TTS**                    | [Gradium](https://gradium.ai)                                              |
 | **Transport**              | SmallWebRTC (local) · Daily (Pipecat Cloud) · Twilio (phone)               |
 | **Orchestration / Deploy** | [Pipecat](https://pipecat.ai) · [Pipecat Cloud](https://pipecat.daily.co)  |
-| **Eval / Healing**         | [Cekura](https://cekura.com) · Claude (`claude-sonnet-4-6`)                |
+| **Eval / Healing**         | [Cekura](https://cekura.com) · GPT-5.5 patches (via token router)          |
 | **Video UI / Vision**      | WebRTC client in `server/demo_client/` · MediaPipe Tasks Vision            |
 
 Runtime surfaces: **`server/`** (Pipecat agent — `bot-nemotron.py` primary, `bot-gpt.py` fallback), **`server/demo_client/`** (browser video client), the **Twilio websocket path** (8 kHz, avatar disabled), and **`harness/`** (the self-heal loop).
@@ -101,7 +101,8 @@ Open **http://localhost:7860** and click **Join now** (first launch ~20s while P
 | `NEMOTRON_ENABLE_THINKING`                   | Keep `false` for voice (adds latency, leaks into speech)           |
 | `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`   | Optional Twilio call-metadata lookup                               |
 | `ENV`                                        | Set `local` for local dev — required                               |
-| `CEKURA_API_KEY` / `ANTHROPIC_API_KEY`       | Self-healing harness / Claude patches                              |
+| `CEKURA_API_KEY`                             | Self-healing harness (Cekura runs)                                 |
+| `TOKEN_ROUTER_API_KEY` / `TOKEN_ROUTER_BASE_URL` | GPT-5.5 patch proposals (OpenAI-compatible token router)       |
 | `NGROK_DOMAIN` / `CEKURA_WEBHOOK_SECRET`     | Static ngrok domain / webhook auth                                 |
 | `AVATAR_PROVIDER`                            | Optional Pipecat avatar layer; `none` = audio-only default         |
 | `AVATAR_VIDEO_WIDTH` / `AVATAR_VIDEO_HEIGHT` | Avatar video track dimensions                                      |
@@ -210,7 +211,7 @@ uv run python3 ../harness/generate_dashboard.py \
 
 **NVIDIA — Nemotron.** Solid open-weights default: Nemotron 3 Super (120B) handled the pharmacy flow well — reliable tool-calling for identity verification and refills, good enough to run as the primary path over GPT-4.1. Watch-outs we hit: with `NEMOTRON_ENABLE_THINKING=true`, reasoning tokens add latency and can leak into spoken TTS when the serving stack has no reasoning parser (we keep it `false` for voice); and Parakeet STT expects 16 kHz mono PCM, so Twilio's 8 kHz audio needs resampling or a Gradium fallback.
 
-**Cekura — self-improvement loops.** The eval → webhook → self-heal loop is the heart of this project and it worked: failure transcripts were detailed enough to drive targeted Claude patches, and webhooks fired reliably. Friction worth fixing: scenario runs wouldn't go past **~3 concurrent** (anything beyond stalled or failed), runs were **slow** to complete, and the **Cekura Claude Code skill repeatedly asked us to re-authenticate** within a single session.
+**Cekura — self-improvement loops.** The eval → webhook → self-heal loop is the heart of this project and it worked: failure transcripts were detailed enough to drive targeted GPT-5.5 patches, and webhooks fired reliably. Friction worth fixing: scenario runs wouldn't go past **~3 concurrent** (anything beyond stalled or failed), runs were **slow** to complete, and the **Cekura Claude Code skill repeatedly asked us to re-authenticate** within a single session.
 
 ## References
 
