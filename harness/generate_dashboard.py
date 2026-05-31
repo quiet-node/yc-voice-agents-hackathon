@@ -1758,7 +1758,6 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     .matrix-run-btn:hover { background: var(--teal); color: #fff; }
     .matrix-run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .toast-error { background: #7f1d1d; }
     .resolve-btn {
       padding: 5px 14px;
       font-size: 12px;
@@ -2645,7 +2644,7 @@ async function triggerHeal(scenarioNames, itemId, buttonEl, _itemDiv) {
 async function runScenario(scenarioNames, buttonEl) {
   if (!scenarioNames || scenarioNames.length === 0) return;
   const origText = buttonEl ? buttonEl.textContent : "";
-  if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = "⏳…"; }
+  if (buttonEl) { buttonEl.disabled = true; buttonEl.textContent = "⏳ Sending…"; }
   try {
     const res = await fetch("/api/run-scenario", {
       method: "POST",
@@ -2654,24 +2653,22 @@ async function runScenario(scenarioNames, buttonEl) {
     });
     const payload = await res.json().catch(() => ({}));
     if (!res.ok || !payload.ok) {
-      showToast(`⚠ Run failed: ${payload.error || "unknown error"}`, "error");
+      if (buttonEl) { buttonEl.textContent = "✗ Error"; buttonEl.style.color = "#dc2626"; }
+      setTimeout(() => {
+        if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = origText; buttonEl.style.color = ""; }
+      }, 3000);
     } else {
-      showToast(`▶ Running "${scenarioNames[0]}" — check Cekura for results (run #${payload.run_id})`, "info");
+      if (buttonEl) { buttonEl.textContent = "✓ Sent to Cekura!"; buttonEl.style.color = "#059669"; }
+      setTimeout(() => {
+        if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = origText; buttonEl.style.color = ""; }
+      }, 3000);
     }
   } catch (err) {
-    showToast(`⚠ Run request failed: ${err.message}`, "error");
-  } finally {
-    if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = origText; }
+    if (buttonEl) { buttonEl.textContent = "✗ Failed"; buttonEl.style.color = "#dc2626"; }
+    setTimeout(() => {
+      if (buttonEl) { buttonEl.disabled = false; buttonEl.textContent = origText; buttonEl.style.color = ""; }
+    }, 3000);
   }
-}
-
-function showToast(msg, type = "info") {
-  const toast = document.getElementById("heal-toast");
-  const msgEl = document.getElementById("heal-msg");
-  if (!toast || !msgEl) return;
-  msgEl.textContent = msg;
-  toast.className = `heal-toast${type === "error" ? " toast-error" : ""}`;
-  setTimeout(() => { toast.classList.add("hidden"); }, 6000);
 }
 
 function renderFixQueue() {
