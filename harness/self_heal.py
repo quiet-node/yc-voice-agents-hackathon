@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bayview self-healing loop.
 
-Runs a single Cekura scenario, calls Claude to propose a targeted prompt patch
+Runs a single Cekura scenario, calls GPT-5.5 to propose a targeted prompt patch
 if it fails, applies the patch to bot-nemotron.py, deploys to Pipecat Cloud,
 re-runs the same scenario, and opens a GitHub PR when the score improves.
 
@@ -232,7 +232,7 @@ def poll_run(run_id: int) -> RunResult:
 
 
 # ---------------------------------------------------------------------------
-# Claude: propose prompt patch
+# GPT-5.5: propose prompt patch
 # ---------------------------------------------------------------------------
 
 _PATCH_PROMPT = """\
@@ -340,14 +340,14 @@ def propose_patch(
     )
     raw = (response.choices[0].message.content or "").strip()
 
-    # Strip markdown fences if Claude added them despite instructions
+    # Strip markdown fences if the model added them despite instructions
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
 
     try:
         proposal = json.loads(raw)
     except json.JSONDecodeError:
-        print(f"  ⚠  Claude returned non-JSON: {raw[:200]}")
+        print(f"  ⚠  Model returned non-JSON: {raw[:200]}")
         return None
 
     find = proposal.get("find", "")
@@ -355,7 +355,7 @@ def propose_patch(
     rationale = proposal.get("rationale", "")
 
     if not find or not replace:
-        print("  ⚠  Claude proposal missing 'find' or 'replace' field.")
+        print("  ⚠  Model proposal missing 'find' or 'replace' field.")
         return None
 
     bot_content = BOT_FILE.read_text(encoding="utf-8")
@@ -785,7 +785,7 @@ def run_heal(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Bayview self-healing loop: run → Claude patches prompt → deploy → rerun → PR.",
+        description="Bayview self-healing loop: run → GPT-5.5 patches prompt → deploy → rerun → PR.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
