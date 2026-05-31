@@ -213,6 +213,8 @@ uv run python3 ../harness/generate_dashboard.py \
 
 **Cekura — self-improvement loops.** The eval → webhook → self-heal loop is the heart of this project and it worked: failure transcripts were detailed enough to drive targeted GPT-5.5 patches, and webhooks fired reliably. Friction worth fixing: scenario runs wouldn't go past **~3 concurrent** (anything beyond stalled or failed), runs were **slow** to complete, and the **Cekura Claude Code skill repeatedly asked us to re-authenticate** within a single session.
 
+**Pipecat, Pipecat Cloud & Twilio.** Simple and easy to use — Pipecat's pipeline model was intuitive and Claude integrated with it easily and seamlessly with no issues, and deploying to Pipecat Cloud was painless. Twilio was the same story: wiring up phone calls was smooth and Claude handled the integration cleanly.
+
 ## References
 
 [Pipecat docs](https://docs.pipecat.ai/) · [Pipecat Cloud](https://docs.pipecat.ai/pipecat-cloud/introduction) · [examples](https://github.com/pipecat-ai/pipecat-examples) · [Discord](https://discord.gg/pipecat) — [Cekura docs](https://docs.cekura.ai) · [Claude Code guide](https://docs.cekura.ai/mcp/claude-code-guide) · [Pipecat integration](https://docs.cekura.ai/documentation/integrations/pipecat/automated) — [Twilio dev hub](https://www.twilio.com/en-us/developers) · [Dev Phone](https://www.twilio.com/docs/labs/dev-phone)
